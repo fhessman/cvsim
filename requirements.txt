@@ -1,0 +1,12 @@
+numpy
+scipy
+matplotlib
+astropy
+PyYAML
+
+# Needed for --lsq_fit/--mcmc_fit
+emcee
+corner
+
+# Needed only for gui.py (optional GUI front-end for simulate.py)
+PySide6

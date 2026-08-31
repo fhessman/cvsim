@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+
+# Development-only scratch space and regenerable irradiation caches --
+# never part of the published tree (see README).
+/tmp/
+/cache/
+
+# Default destination for simulate.py's own generated output
+# (plots, FITS tables) -- regenerated on every run, not source.
+/demo_output/
+
+.DS_Store
