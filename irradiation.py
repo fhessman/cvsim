@@ -50,7 +50,7 @@ SIGMA_SB = 5.670374419e-8  # W / (m^2 K^4)
 
 def star_irradiation_flux(sec_points, sec_normals, star_center, R1, T_star,
                            disc=None, n_primary=200, u_primary=0.0, chunk=150, n_t=40,
-                           accretion_footpoint_dirs=None, angle_acc=0.0, T_acc=None,
+                           accretion_footpoint_dirs=None, spot_acc=0.0, T_acc=None,
                            u_acc=0.0):
     """
     Absorbed flux [W/m^2] at each secondary surface point from the
@@ -91,9 +91,9 @@ def star_irradiation_flux(sec_points, sec_normals, star_center, R1, T_star,
 
     sec_points, sec_normals: arrays shaped (Nsec,3), outward unit normals.
 
-    accretion_footpoint_dirs/angle_acc/T_acc/u_acc: the primary's
+    accretion_footpoint_dirs/spot_acc/T_acc/u_acc: the primary's
     accretion spot(s) (see magnetic.field_line_to_point/accretion_spot_mask,
-    render.build_temperature_maps' r_acc) -- a per-point temperature AND
+    render.build_temperature_maps' angle_acc) -- a per-point temperature AND
     limb-darkening-coefficient override near each field line's footpoint,
     baked into this integral (T_acc/u_acc instead of the uniform
     T_star/u_primary everywhere) the same way it's baked into the
@@ -109,9 +109,9 @@ def star_irradiation_flux(sec_points, sec_normals, star_center, R1, T_star,
 
     star_pts, star_normals, star_areas = sphere_points_full(star_center, R1, n_primary)
     star_T = primary_surface_temperature(star_normals, T_star, accretion_footpoint_dirs,
-                                          angle_acc, T_acc)
+                                          spot_acc, T_acc)
     star_u = primary_limb_coefficient(star_normals, u_primary, accretion_footpoint_dirs,
-                                       angle_acc, u_acc)
+                                       spot_acc, u_acc)
     n_p = star_pts.shape[0]
     flux = np.zeros(sec_points.shape[0])
 
@@ -257,7 +257,7 @@ def secondary_irradiated_teff(lobe, sec_points, sec_normals, sec_areas, T_eff2, 
                                disc_pos, disc_area, disc_T,
                                disc=None, disc_normal=None, beta_grav=0.08, disc_chunk=150,
                                u_disc=0.0, u_primary=0.0, n_primary_irrad=200, star_chunk=150,
-                               accretion_footpoint_dirs=None, angle_acc=0.0, T_acc=None,
+                               accretion_footpoint_dirs=None, spot_acc=0.0, T_acc=None,
                                u_acc=0.0):
     """
     Full local effective-temperature map of the secondary: gravity
@@ -288,7 +288,7 @@ def secondary_irradiated_teff(lobe, sec_points, sec_normals, sec_areas, T_eff2, 
     the primary's render/light-curve resolution, exactly like n_disc_irrad
     is for the disc (see build_temperature_maps).
 
-    accretion_footpoint_dirs/angle_acc/T_acc/u_acc: forwarded straight to
+    accretion_footpoint_dirs/spot_acc/T_acc/u_acc: forwarded straight to
     star_irradiation_flux -- the primary's accretion spot(s) (if any are
     active) irradiate the secondary too, not just their own emission map.
     """
@@ -300,7 +300,7 @@ def secondary_irradiated_teff(lobe, sec_points, sec_normals, sec_areas, T_eff2, 
     F_star = star_irradiation_flux(sec_points, sec_normals, star_center, R1, T_eff1, disc=disc,
                                     n_primary=n_primary_irrad, u_primary=u_primary, chunk=star_chunk,
                                     accretion_footpoint_dirs=accretion_footpoint_dirs,
-                                    angle_acc=angle_acc, T_acc=T_acc, u_acc=u_acc)
+                                    spot_acc=spot_acc, T_acc=T_acc, u_acc=u_acc)
     if disc is not None and disc.is_empty:
         # a null disc (no disc configured, see disc.Disc.is_empty) has zero
         # area everywhere, so its irradiation contribution is always exactly

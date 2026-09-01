@@ -15,6 +15,7 @@ H = 6.62607015e-34     # J s
 C = 2.99792458e8       # m/s
 KB = 1.380649e-23      # J/K
 PARSEC_M = 3.0856775814913673e16  # m
+AU_M = 1.495978707e11             # m (IAU 2012 exact definition)
 
 V_WAVELENGTH_M = 5500e-10   # Johnson V effective wavelength, ~5500 Angstrom
 

@@ -543,7 +543,7 @@ class TemperatureMaps:
                                     # this whole (expensive) TemperatureMaps.
     primary_base_areas: np.ndarray  # (Nprim,) per-point area weight at unit radius
     primary_spot_mask: np.ndarray   # (Nprim,) bool -- True where the accretion spot (see
-                                     # build_temperature_maps' r_acc/angle_acc/T_acc,
+                                     # build_temperature_maps' angle_acc/spot_acc/T_acc,
                                      # magnetic.py) covers this primary sample point,
                                      # all-False if inactive. Deliberately a MASK, not a
                                      # baked temperature array: the primary's own
@@ -556,7 +556,7 @@ class TemperatureMaps:
                                      # heating of the SECONDARY (via irradiation, baked
                                      # into Tsec below at build time, same as every other
                                      # irradiation input) doesn't get this live treatment.
-    accretion_footpoint_dirs: list  # list of (3,) unit vectors, one per usable --r_acc
+    accretion_footpoint_dirs: list  # list of (3,) unit vectors, one per usable --angle_acc
                                      # entry (see render.accretion_connection_line),
                                      # possibly empty (no active spot)
     accretion_field_lines: list     # parallel list of (n,3) curves from the primary's
@@ -571,52 +571,59 @@ class TemperatureMaps:
     stream_T: float             # stream temperature [K] -- the (cusp-fixed) T at L1
 
 
-def accretion_connection_line(lobe, R1, theta_1, phi_1, r_acc, T_eff1, T_acc, traj=None,
+def accretion_connection_line(lobe, R1, theta_1, phi_1, angle_acc, T_eff1, T_acc, traj=None,
                                stream_angle_deg=None):
     """
     The field line(s) connecting the ballistic accretion stream to the
-    primary's surface at primary-centered radius r_acc -- a single float,
-    or an array-like of them (see params._parse_r_acc; every entry
-    connects to the same stream/magnetic geometry, just at a different
-    point) -- the geometry-only half of _accretion_spot_data, split out
-    so simulate.py's "outline" output and _accretion_spot_data can share
-    it.
+    primary's surface at swept angle angle_acc (cumulative primary-centered
+    azimuth from L1, same convention as stream_angle_deg) -- a single
+    float, or an array-like of them (see params._parse_angle_acc; every
+    entry connects to the same stream/magnetic geometry, just at a
+    different point along it) -- the geometry-only half of
+    _accretion_spot_data, split out so simulate.py's "outline" output and
+    _accretion_spot_data can share it.
 
     traj: see _accretion_spot_data. stream_angle_deg: forwarded to
     stream.integrate_stream (see its own docstring) if `traj` isn't
-    already given -- has no effect when it is, since the trajectory's
-    own extent was decided wherever it was actually integrated.
+    already given -- extended to cover angle_acc's own largest entry (so
+    the trajectory is always integrated far enough to actually reach
+    every requested connection point) when it would otherwise fall
+    short; has no effect when `traj` is already given, since the
+    trajectory's own extent was decided wherever it was actually
+    integrated.
 
     Returns (footpoint_dirs, field_lines): parallel lists (each possibly
-    empty, if r_acc is None or every entry turns out unusable), one entry
-    per r_acc value that IS usable -- footpoint_dirs are (3,) unit
+    empty, if angle_acc is None or every entry turns out unusable), one entry
+    per angle_acc value that IS usable -- footpoint_dirs are (3,) unit
     vectors, field_lines are (n,3) curves from the surface to that
     entry's connection point. Prints a one-line explanation for every
-    entry that ends up unusable, except simply not being requested (r_acc
-    is None) -- see r_acc/T_acc's own docstrings in params.py.
+    entry that ends up unusable, except simply not being requested (angle_acc
+    is None) -- see angle_acc/T_acc's own docstrings in params.py.
     """
     footpoint_dirs, field_lines = [], []
-    if r_acc is not None:
-        radii = np.atleast_1d(r_acc)
+    if angle_acc is not None:
+        angles = np.atleast_1d(angle_acc)
         if traj is None and lobe.fill_factor >= 1.0:
             from stream import integrate_stream
-            traj = integrate_stream(lobe, stream_angle_deg=stream_angle_deg)
+            eff_stream_angle = max(stream_angle_deg, float(np.max(angles))) \
+                if stream_angle_deg is not None else float(np.max(angles))
+            traj = integrate_stream(lobe, stream_angle_deg=eff_stream_angle)
         if traj is None:
             print("no accretion stream (secondary underfills its Roche lobe): "
-                  "ignoring r_acc")
+                  "ignoring angle_acc")
         elif T_acc <= T_eff1:
             print(f"T_acc={T_acc:g}K is not hotter than T_1={T_eff1:g}K: "
                   f"ignoring accretion spot")
         else:
-            from stream import r_acc_index
+            from stream import angle_acc_index
             from magnetic import field_line_to_point
             center1 = np.array([lobe.x1, 0.0, 0.0])
-            for r in radii:
-                i_acc = r_acc_index(traj, lobe.x1, r)
+            for ang in angles:
+                i_acc = angle_acc_index(traj, ang)
                 if i_acc is None:
-                    r1_traj = np.hypot(traj["x"] - lobe.x1, traj["y"])
-                    print(f"r_acc={r:g} is smaller than the stream's minimum approach "
-                          f"to the primary ({r1_traj.min():.6g}): ignoring that accretion spot")
+                    print(f"angle_acc={ang:g} deg is never actually swept by the stream "
+                          f"trajectory (max reached: {np.max(np.abs(traj['angle_deg'])):.6g} deg): "
+                          f"ignoring that accretion spot")
                     continue
                 stream_conn_pt = np.array([traj["x"][i_acc], traj["y"][i_acc], 0.0])
                 # n well above field_line_to_point's own default (100):
@@ -635,15 +642,15 @@ def accretion_connection_line(lobe, R1, theta_1, phi_1, r_acc, T_eff1, T_acc, tr
     return footpoint_dirs, field_lines
 
 
-def _accretion_spot_data(lobe, R1, T_eff1, theta_1, phi_1, r_acc, angle_acc, T_acc,
+def _accretion_spot_data(lobe, R1, T_eff1, theta_1, phi_1, angle_acc, spot_acc, T_acc,
                           primary_normals, traj=None, stream_angle_deg=None):
     """
     The primary's accretion spot(s) (see magnetic.py): connect the
-    ballistic stream to a magnetic field line at each primary-centered
-    radius in r_acc (via accretion_connection_line), and find which of
+    ballistic stream to a magnetic field line at each swept angle in
+    angle_acc (via accretion_connection_line), and find which of
     the primary's own sample points (primary_normals, unit directions)
-    fall within angle_acc of any of the field lines' surface footpoints
-    -- every spot shares the same angle_acc/T_acc/u_acc, so this comes
+    fall within spot_acc of any of the field lines' surface footpoints
+    -- every spot shares the same spot_acc/T_acc/u_acc, so this comes
     down to a single union mask, not one per spot.
 
     traj: pass an already-integrated stream.integrate_stream(lobe) result
@@ -656,19 +663,19 @@ def _accretion_spot_data(lobe, R1, T_eff1, theta_1, phi_1, r_acc, angle_acc, T_a
 
     Returns (spot_mask, footpoint_dirs, field_lines):
       spot_mask: (Nprim,) bool, all-False if inactive.
-      footpoint_dirs: list of (3,) unit vectors, one per usable r_acc
+      footpoint_dirs: list of (3,) unit vectors, one per usable angle_acc
         entry (see accretion_connection_line), possibly empty.
       field_lines: parallel list of (n,3) curves, possibly empty.
     """
     from magnetic import accretion_spot_mask
 
     footpoint_dirs, field_lines = accretion_connection_line(
-        lobe, R1, theta_1, phi_1, r_acc, T_eff1, T_acc, traj=traj,
+        lobe, R1, theta_1, phi_1, angle_acc, T_eff1, T_acc, traj=traj,
         stream_angle_deg=stream_angle_deg)
 
     spot_mask = np.zeros(primary_normals.shape[0], dtype=bool)
     for footpoint_dir in footpoint_dirs:
-        spot_mask |= accretion_spot_mask(primary_normals, footpoint_dir, angle_acc)
+        spot_mask |= accretion_spot_mask(primary_normals, footpoint_dir, spot_acc)
     return spot_mask, footpoint_dirs, field_lines
 
 
@@ -679,7 +686,7 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
                             n_sec=20000, n_disc=(80, 160), n_disc_z=20,
                             n_disc_irrad=(30, 60), irrad_chunk=150, u_disc=0.0,
                             u_primary=0.0, n_primary_irrad=200, n_primary=200,
-                            theta_1=0.0, phi_1=0.0, r_acc=None, angle_acc=np.radians(5.0),
+                            theta_1=0.0, phi_1=0.0, angle_acc=None, spot_acc=np.radians(5.0),
                             T_acc=100000.0, u_acc=0.0, incl_deg=None, stream_angle_deg=None):
     """
     Build the TemperatureMaps consumed by render_system_image and (for a
@@ -692,7 +699,7 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
     gets RENDERED (still truncated at the disc impact point or first
     closest approach, whichever's found -- see the stream section
     below), only how far it's available for the accretion-spot
-    connection (r_acc, possibly beyond where the default stopping
+    connection (angle_acc, possibly beyond where the default stopping
     condition would have reached) and for the closest-approach/final-
     radius diagnostic integrate_stream itself prints.
 
@@ -754,19 +761,19 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
 
     theta_1/phi_1 [rad]: the primary's magnetic-axis obliquity/azimuth
     (params.SystemParams.theta_1_rad/phi_1_rad -- see magnetic.py). Only
-    matter here if r_acc is also given (they orient the accretion spot);
+    matter here if angle_acc is also given (they orient the accretion spot);
     otherwise unused by this function (still used by the outline output's
     field-line display, independent of temp_maps -- see plots.py).
 
-    r_acc/angle_acc/T_acc/u_acc: the accretion spot(s) (params.ModelParams'
+    angle_acc/spot_acc/T_acc/u_acc: the accretion spot(s) (params.ModelParams'
     fields of the same name -- see magnetic.field_line_to_point,
-    accretion_spot_mask). r_acc [units of a] is the primary-centered
+    accretion_spot_mask). angle_acc [units of a] is the primary-centered
     radius where the ballistic stream is assumed to hand off to the
     primary's magnetic field -- a single float, or an array-like of them
-    (params._parse_r_acc, e.g. simulate.py's --r_acc), one heated spot
-    per entry, all sharing the same angle_acc/T_acc/u_acc below (only the
+    (params._parse_angle_acc, e.g. simulate.py's --angle_acc), one heated spot
+    per entry, all sharing the same spot_acc/T_acc/u_acc below (only the
     connection radius differs between them); None (default) disables the
-    whole feature. angle_acc [rad] is each heated spot's angular radius
+    whole feature. spot_acc [rad] is each heated spot's angular radius
     around its field line's surface footpoint. T_acc [K] is every spot's
     temperature, u_acc its own limb-darkening coefficient (independent of
     u_primary -- negative values give limb-brightening, a crude stand-in
@@ -832,12 +839,39 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
         traj = None
     else:
         from stream import integrate_stream, disc_impact_index, closest_approach_index, sample_points
-        traj = integrate_stream(lobe, stream_angle_deg=stream_angle_deg)
-        idx = disc_impact_index(traj, disc.rim, lobe.x1)
-        if idx is None:
-            idx = closest_approach_index(traj, lobe.x1)
-        if idx is None:
+        # extend the integration limit (if needed) to guarantee the
+        # trajectory actually sweeps far enough to reach every requested
+        # accretion-connection angle -- see accretion_connection_line's
+        # own matching extension, which has no effect here since the
+        # traj built below is passed into _accretion_spot_data already
+        # built, not left for accretion_connection_line to build itself.
+        eff_stream_angle = stream_angle_deg
+        if angle_acc is not None:
+            max_angle_acc = float(np.max(np.atleast_1d(angle_acc)))
+            eff_stream_angle = max(stream_angle_deg, max_angle_acc) \
+                if stream_angle_deg is not None else max_angle_acc
+        traj = integrate_stream(lobe, stream_angle_deg=eff_stream_angle)
+        # always reported (see disc_impact_index's own report= option),
+        # even when its result isn't used for truncation below
+        disc_idx = disc_impact_index(traj, disc.rim, lobe.x1, report=True)
+        if stream_angle_deg is not None:
+            # an explicit stream_angle_deg (see simulate.py's --stream_angle)
+            # is the user's own authoritative instruction for how far the
+            # stream extends -- e.g. to simulate overflow past where it
+            # would otherwise hit the disc (see STREAM tab's own note) --
+            # so use the WHOLE computed trajectory (as both a visible
+            # ribbon and a physical contributor to the temperature map/
+            # light curve) rather than second-guessing it with the
+            # disc-impact/closest-approach heuristics below, which exist
+            # only to pick a sensible endpoint when stream_angle_deg wasn't
+            # given at all.
             idx = len(traj["x"]) - 1
+        else:
+            idx = disc_idx
+            if idx is None:
+                idx = closest_approach_index(traj, lobe.x1)
+            if idx is None:
+                idx = len(traj["x"]) - 1
         n_along = 300
         s_max = traj["s"][idx]
         s_vals = np.linspace(0.0, s_max, n_along)
@@ -863,9 +897,9 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
                                 (stream_width / n_strands) * (s_max / n_along))
 
     # --- accretion spot: connect the stream to a magnetic field line at
-    #     radius r_acc (see this function's own docstring, magnetic.py) ---
+    #     radius angle_acc (see this function's own docstring, magnetic.py) ---
     primary_spot_mask, accretion_footpoint_dirs, accretion_field_lines = _accretion_spot_data(
-        lobe, R1, T_eff1, theta_1, phi_1, r_acc, angle_acc, T_acc, primary_normals, traj=traj,
+        lobe, R1, T_eff1, theta_1, phi_1, angle_acc, spot_acc, T_acc, primary_normals, traj=traj,
         stream_angle_deg=stream_angle_deg)
 
     # --- secondary: irradiated (or plain gravity-darkened) temperature map ---
@@ -889,7 +923,7 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
                                           beta_grav=beta_grav, disc_chunk=irrad_chunk, u_disc=u_disc,
                                           u_primary=u_primary, n_primary_irrad=n_primary_irrad,
                                           accretion_footpoint_dirs=accretion_footpoint_dirs,
-                                          angle_acc=angle_acc, T_acc=T_acc, u_acc=u_acc)
+                                          spot_acc=spot_acc, T_acc=T_acc, u_acc=u_acc)
     else:
         from roche import gravity_darkened_teff
         Tsec = gravity_darkened_teff(sec_pts, sec_areas, lobe.q, T_eff2, beta_grav=beta_grav)
@@ -947,8 +981,13 @@ def save_temperature_maps(path, temp_maps, system, model, ntheta, nphi, irradiat
     X,Y,Z,NX,NY,NZ,TEMP,AREA -- NX/NY/NZ columns omitted for a flat
     disc), STREAM (bintable: X,Y,Z,AREA).
     """
+    import os
     from astropy.io import fits
     import params as _params
+
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
 
     hdr = _params.metadata_header(
         system, model,
@@ -981,11 +1020,11 @@ def save_temperature_maps(path, temp_maps, system, model, ntheta, nphi, irradiat
     # integral, the whole reason this cache exists), the accretion spot(s)
     # are cheap to recompute (one stream integration + a closed-form
     # field-line trace each), so load_temperature_maps just reruns
-    # _accretion_spot_data from the header's own r_acc/theta_1/phi_1/
-    # angle_acc/T_acc -- one source of truth, no risk of the cached mask
+    # _accretion_spot_data from the header's own angle_acc/theta_1/phi_1/
+    # spot_acc/T_acc -- one source of truth, no risk of the cached mask
     # drifting from a newer definition. Note this means only the FIRST
-    # --r_acc entry survives a save/load round-trip (the header only
-    # stores ModelParams.r_acc's single value, see params._parse_r_acc) --
+    # --angle_acc entry survives a save/load round-trip (the header only
+    # stores ModelParams.angle_acc's single value, see params._parse_angle_acc) --
     # a --load-irradiation cache never reconstructs more than one spot.
     star_cols = [
         fits.Column(name="NX", format="D", array=temp_maps.primary_normals[:, 0]),
@@ -1079,12 +1118,12 @@ def load_temperature_maps(path, stream_angle_deg=None):
     lobe, disc, _disc_teff_func = _params.build_system(system, model, ntheta=ntheta, nphi=nphi)
 
     # recompute (cheap -- see save_temperature_maps' comment) rather than
-    # persist: uses the loaded system/model's own r_acc/theta_1/phi_1/
-    # angle_acc/T_acc, so a --load-irradiation cache still shows/applies
+    # persist: uses the loaded system/model's own angle_acc/theta_1/phi_1/
+    # spot_acc/T_acc, so a --load-irradiation cache still shows/applies
     # the correct accretion spot.
     primary_spot_mask, accretion_footpoint_dirs, accretion_field_lines = _accretion_spot_data(
         lobe, system.R_1, system.T_1, system.theta_1_rad, system.phi_1_rad,
-        model.r_acc, model.angle_acc_rad, model.T_acc, primary_normals,
+        model.angle_acc, model.spot_acc_rad, model.T_acc, primary_normals,
         stream_angle_deg=stream_angle_deg)
 
     temp_maps = TemperatureMaps(Tsec=Tsec, sec_areas=sec_areas, sec_pts=sec_pts, sec_normals=sec_normals,
@@ -1175,7 +1214,6 @@ def _magnetic_stream_velocity(line, lobe, center1, traj):
     actual motion, infall.
     """
     from roche import potential
-    from stream import r_acc_index
 
     tangent = np.gradient(line, axis=0)
     tangent /= np.maximum(np.linalg.norm(tangent, axis=-1, keepdims=True), 1e-300)
@@ -1184,8 +1222,17 @@ def _magnetic_stream_velocity(line, lobe, center1, traj):
     Phi = potential(line[:, 0], line[:, 1], line[:, 2], lobe.q)
     Phi_conn = Phi[-1]
 
-    r_conn = float(np.linalg.norm(line[-1] - center1))
-    i_acc = r_acc_index(traj, lobe.x1, r_conn) if traj is not None else None
+    # line[-1] IS the connection point angle_acc_index originally found in
+    # traj (see accretion_connection_line) -- recover that same index by
+    # nearest (x,y) match rather than re-deriving a radius or angle from
+    # it: an angle recovered via arctan2 would wrap (mod 360), silently
+    # finding the WRONG, much-earlier point whenever angle_acc's own
+    # value exceeds 360 (the trajectory loops around more than once).
+    if traj is not None:
+        dist_to_conn = np.hypot(traj["x"] - line[-1, 0], traj["y"] - line[-1, 1])
+        i_acc = int(np.argmin(dist_to_conn))
+    else:
+        i_acc = None
     if i_acc is None:
         v_conn_vec = np.zeros(3)
     else:
@@ -1249,14 +1296,14 @@ def render_system_image(lobe, disc, T_eff1, R1, phase, incl_deg, temp_maps,
     T_eff1: primary effective temperature [K]. R1: primary radius, units of a.
     T_acc: accretion spot temperature [K], applied only where
     temp_maps.primary_spot_mask is set (see build_temperature_maps'
-    r_acc/angle_acc) -- live here (like T_eff1) rather than baked into
+    angle_acc/spot_acc) -- live here (like T_eff1) rather than baked into
     temp_maps, so it stays a cheap parameter to vary without rebuilding.
 
     The accretion stream (temp_maps.stream_pts, L1 to the disc-impact
     point) is rendered at the single constant temp_maps.stream_T -- "the
     temperature of the L1 point" -- since the stream isn't otherwise
     given its own thermal model (see build_temperature_maps). Each active
-    --r_acc entry's magnetically-channeled continuation
+    --angle_acc entry's magnetically-channeled continuation
     (temp_maps.accretion_field_lines, the primary's surface out to that
     entry's stream connection point) is rendered too, logarithmically
     graded (log(T) linear along the line) from T_acc at the surface end
@@ -1330,7 +1377,7 @@ def render_system_image(lobe, disc, T_eff1, R1, phase, incl_deg, temp_maps,
     Ds_list.append(Dp); Hx_list.append(Hp); Hy_list.append(Hp); Lm_list.append(Lp)
 
     # --- primary: uniform T_eff1 except the accretion spot (T_acc, see
-    #     temp_maps.primary_spot_mask/build_temperature_maps' r_acc),
+    #     temp_maps.primary_spot_mask/build_temperature_maps' angle_acc),
     #     occulted by secondary lobe + disc -- fixed direction pattern
     #     (temp_maps.primary_normals), same backface-cull + occlusion
     #     pattern as the secondary above ---
@@ -1401,10 +1448,10 @@ def render_system_image(lobe, disc, T_eff1, R1, phase, incl_deg, temp_maps,
     Ds_list.append(Dst); Hx_list.append(Hst); Hy_list.append(Hst)
     Lm_list.append(np.ones(vis_s.sum()))  # no limb-darkening coefficient for the stream
 
-    # --- magnetic accretion stream: one ribbon per active --r_acc entry
+    # --- magnetic accretion stream: one ribbon per active --angle_acc entry
     #     (temp_maps.accretion_field_lines, primary surface to that
     #     entry's stream connection point -- see build_temperature_maps'
-    #     r_acc/_magnetic_stream_ribbon), painted with a LOGARITHMIC
+    #     angle_acc/_magnetic_stream_ribbon), painted with a LOGARITHMIC
     #     temperature transition along the line -- log(T) linear in
     #     position, i.e. T_acc*(stream_T/T_acc)**s -- from T_acc at the
     #     surface end (points[0]) down to temp_maps.stream_T -- the
@@ -1507,7 +1554,7 @@ def radial_velocity_curve(lobe, disc, T_eff1, R1, phases, incl_deg, a_meters, P_
     Computed SEPARATELY for each of four families of emitting elements --
     primary, secondary, the ballistic accretion stream, and its
     magnetically-channeled continuation (see build_temperature_maps'
-    r_acc) -- rather than pooled into one combined median, so each
+    angle_acc) -- rather than pooled into one combined median, so each
     component's own kinematics (e.g. the stream's free fall, distinct
     from the two stars' rigid orbital motion) stays visible instead of
     being washed out by whichever component happens to be brightest. The
@@ -1549,7 +1596,7 @@ def radial_velocity_curve(lobe, disc, T_eff1, R1, phases, incl_deg, a_meters, P_
     each an array over `phases`, km/s:
       rv_primary/rv_secondary/rv_stream/rv_magnetic: that component's own
         weighted-median curve. NaN at any phase where the component has
-        no visible weight at all (e.g. rv_magnetic when --r_acc is
+        no visible weight at all (e.g. rv_magnetic when --angle_acc is
         unset, or a component fully eclipsed).
       rv1/rv2: the primary/secondary Roche mass-points' OWN circular
         velocity (not weighted by anything -- just those two point
@@ -1593,11 +1640,21 @@ def radial_velocity_curve(lobe, disc, T_eff1, R1, phases, incl_deg, a_meters, P_
     # one velocity, so only the centerline needs sampling for this).
     if lobe.fill_factor >= 1.0:
         traj = integrate_stream(lobe, stream_angle_deg=stream_angle_deg)
-        idx = disc_impact_index(traj, disc.rim, lobe.x1)
-        if idx is None:
-            idx = closest_approach_index(traj, lobe.x1)
-        if idx is None:
+        # always reported (see disc_impact_index's own report= option),
+        # even when its result isn't used for truncation below
+        disc_idx = disc_impact_index(traj, disc.rim, lobe.x1, report=True)
+        if stream_angle_deg is not None:
+            # see build_temperature_maps' matching explicit-stream_angle_deg
+            # override -- an explicit request for how far the stream
+            # extends shouldn't be second-guessed by the disc-impact/
+            # closest-approach heuristics below.
             idx = len(traj["x"]) - 1
+        else:
+            idx = disc_idx
+            if idx is None:
+                idx = closest_approach_index(traj, lobe.x1)
+            if idx is None:
+                idx = len(traj["x"]) - 1
         n_along = 300
         s_max = traj["s"][idx]
         s_vals = np.linspace(0.0, s_max, n_along)
@@ -1616,7 +1673,7 @@ def radial_velocity_curve(lobe, disc, T_eff1, R1, phases, incl_deg, a_meters, P_
         stream_areas = np.zeros(0)
         Istream = np.zeros(0)
 
-    # magnetically-channeled continuation, one ribbon per active --r_acc
+    # magnetically-channeled continuation, one ribbon per active --angle_acc
     # entry (see _magnetic_stream_ribbon) -- position/area/temperature
     # and now velocity (_magnetic_stream_velocity) are all phase-
     # independent, so build every ribbon once here rather than once per
@@ -1666,7 +1723,7 @@ def radial_velocity_curve(lobe, disc, T_eff1, R1, phases, incl_deg, a_meters, P_
         rv_stream[i] = _weighted_median(v_s, w_s) * v_scale
 
         # magnetically-channeled continuation, one ribbon per active
-        # --r_acc entry (see magnetic_ribbons above); every entry pooled
+        # --angle_acc entry (see magnetic_ribbons above); every entry pooled
         # into ONE median, since they're all the same physical component
         # (just at different radii). v_rel_m is the along-line free-fall
         # velocity from _magnetic_stream_velocity, on top of the same
@@ -1806,7 +1863,7 @@ def physical_light_curve(lobe, disc, T_eff1, T_eff2, R1, phases, incl_deg, a_met
                           temp_maps=None, n_workers=1, distance_pc=10.0,
                           u_primary=0.0, u_secondary=0.0, u_disc=0.0,
                           n_primary=200, n_primary_irrad=200,
-                          theta_1=0.0, phi_1=0.0, r_acc=None, angle_acc=np.radians(5.0),
+                          theta_1=0.0, phi_1=0.0, angle_acc=None, spot_acc=np.radians(5.0),
                           T_acc=100000.0, u_acc=0.0, stream_angle_deg=None):
     """
     Physically self-consistent eclipse light curve (at `wavelength_m`,
@@ -1885,7 +1942,7 @@ def physical_light_curve(lobe, disc, T_eff1, T_eff2, R1, phases, incl_deg, a_met
     concern from n_primary (the observer-facing flux resolution); see
     build_temperature_maps/irradiation.star_irradiation_flux.
 
-    theta_1/phi_1/r_acc/angle_acc: only used when temp_maps is built
+    theta_1/phi_1/angle_acc/spot_acc: only used when temp_maps is built
     internally -- the primary's accretion spot (see
     build_temperature_maps' own docstring). T_acc/u_acc, in contrast, are
     live parameters every call actually uses (forwarded to
@@ -1903,7 +1960,7 @@ def physical_light_curve(lobe, disc, T_eff1, T_eff2, R1, phases, incl_deg, a_met
             n_disc=n_disc, n_disc_z=n_disc_z,
             n_disc_irrad=n_disc_irrad, irrad_chunk=irrad_chunk, u_disc=u_disc,
             u_primary=u_primary, n_primary_irrad=n_primary_irrad, n_primary=n_primary,
-            theta_1=theta_1, phi_1=phi_1, r_acc=r_acc, angle_acc=angle_acc, T_acc=T_acc,
+            theta_1=theta_1, phi_1=phi_1, angle_acc=angle_acc, spot_acc=spot_acc, T_acc=T_acc,
             u_acc=u_acc, incl_deg=incl_deg, stream_angle_deg=stream_angle_deg)
 
     if n_workers is None or n_workers <= 1:

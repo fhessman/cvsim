@@ -1,0 +1,534 @@
+script_path: ../simulate.py
+python_executable: null
+layout: tabs
+panes:
+- title: SYSTEM
+  arguments:
+  - flag: --prefix
+    label: global label / output filename prefix
+    type: str
+    tip: Shown as every plot's title, and used (with any blanks replaced by '_') as
+      the output filename prefix; defaults to the config file's basename if left blank
+    default: Z Cha
+  - flag: --P_orb
+    label: orbital period P_orb [d]
+    type: float
+    tip: P_orb
+    default: '0.0745'
+  - flag: --a
+    label: orbital separation a [m]
+    type: float
+    tip: a
+    default: '512283319.75'
+  - flag: --q
+    label: mass ratio q [M2/M1]
+    type: float
+    tip: q
+    default: '0.14880952'
+  - flag: --incl
+    label: inclination i [deg]
+    type: float
+    tip: incl
+    default: '81.8'
+  - flag: --dist
+    label: observer dist [pc]
+    type: float
+    tip: Scales the light curve from a relative flux to a real spectral flux density
+      [mJy] at this distance
+    default: '100.0'
+  - flag: --wavelength
+    label: wavelength [A]
+    type: float
+    tip: wavelength (defaults to V-band, 5500 A)
+    default: '5500'
+- title: PHASES
+  arguments:
+  - flag: --phase-min
+    label: phase min
+    type: float
+    tip: Orbital phase (phase-num=1) or phase range start (phase-num>1), for every
+      phase-dependent output. Default 0.25/0.25/1 is deliberately a single, harmless
+      phase -- widen the range below to sweep a full orbit (e.g. -0.3/0.3 to zoom
+      into Z Cha's eclipse window)
+    default: '-0.1'
+  - flag: --phase-max
+    label: phase max
+    type: float
+    tip: Ignored if phase-num=1 (phase min alone is used then)
+    default: '-0.1'
+  - flag: --phase-num
+    label: number of phases
+    type: int
+    tip: 1 (the default) uses phase min alone as a single orbital phase; >1 uses linspace(phase
+      min, phase max, phase-num). For the outline/temperature/intensity outputs, >1
+      writes one output file per phase (a sequence) instead of just one; the lightcurve/magnitude/shadow
+      outputs always plot every phase together on one plot regardless
+    default: '1'
+- title: PRIMARY
+  arguments:
+  - flag: --R_1
+    label: radius R_1 [units of a]
+    type: float
+    tip: R_1
+    default: '0.01326576'
+  - flag: --T_1
+    label: effective temperature T_1 [K]
+    type: float
+    tip: T_1
+    default: '14700'
+  - flag: --u_1
+    label: limb-darkening coefficient u_1
+    type: float
+    tip: 'Linear law: I = I0*(1-u+u*mu), mu=cos(angle to observer); 0 = no limb darkening.
+      Also reduces how strongly the primary irradiates the secondary, so it is baked
+      into a saved irradiation cache -- changing it after loading one is ignored with
+      a warning'
+    default: '0.377'
+  - flag: --n_areas_1
+    label: number of surface elements
+    type: int
+    tip: Total number of roughly equal-area surface elements used for the primary,
+      shared by every output; raise it when the limb-darkening coefficient above matters
+      to your use case (e.g. its effect on ingress/egress shape)
+    default: '200'
+  - flag: --theta_1
+    label: magnetic obliquity theta_1 [deg]
+    type: float
+    tip: Angle between the primary's magnetic axis and the orbital spin axis (0 =
+      aligned); assumes synchronous rotation, so the axis is fixed in the corotating
+      frame. Only the outline output draws field lines from it so far -- no effect
+      on the physical light curve/temperature model yet
+    default: '0.0'
+  - flag: --phi_1
+    label: magnetic azimuth phi_1 [deg]
+    type: float
+    tip: Orientation of the primary's magnetic-axis tilt, measured from +x (the sub-secondary
+      direction at phase 0). Only the outline output uses it so far
+    default: '0.0'
+  - flag: --n_field_1
+    label: number of field-line loops
+    type: int
+    tip: Number of dipole field-line loops drawn from the primary's magnetic axis,
+      geometry only (see magnetic.py); currently only the outline output draws them.
+      0 disables
+    default: '0'
+  - flag: --angle_acc
+    label: accretion connection angle(s) angle_acc [deg]
+    type: str
+    tip: How far around the primary (cumulative swept azimuth from L1, same convention
+      as Stream integration limit angle on the STREAM tab -- 0=facing the secondary,
+      180=directly behind the primary) the accretion stream is assumed to hand off
+      to the primary's magnetic field (see magnetic.field_line_to_point) -- the field
+      lines connected to those points are drawn as solid red lines in the outline
+      output. Each heats a spot on the primary's surface (Accretion spot radius/temperature
+      below), which affects the light curve and irradiates the secondary. Leave blank
+      to disable, use comma-separated values if more than one. Every stream integration
+      prints its closest approach/final radius and the angle reached at each, to help
+      pick a value the trajectory actually reaches
+    default: ''
+  - flag: --spot_acc
+    label: accretion spot radius spot_acc [deg]
+    type: float
+    tip: Angular radius of the heated spot on the primary's surface around the field
+      line's footpoint; only meaningful if Accretion connection angle(s) above is
+      set
+    default: '5.0'
+  - flag: --T_acc
+    label: accretion spot temperature T_acc [K]
+    type: float
+    tip: Temperature of the accretion spot; only meaningful if Accretion connection
+      angle(s) above is set. Ignored with a warning if not hotter than T_eff above
+    default: '100000.0'
+  - flag: --u_acc
+    label: accretion spot limb-darkening coefficient u_acc
+    type: float
+    tip: 'Linear law: I = I0*(1-u+u*mu); independent of the primary''s own Limb-darkening
+      coefficient above; only meaningful if Accretion connection angle(s) above is
+      set. Negative values give limb-brightening instead of darkening, a crude stand-in
+      for cyclotron beaming'
+    default: '0.0'
+- title: SECONDARY
+  arguments:
+  - flag: --R_2
+    label: effective radius R_2 [units of a] (large values clipped to Roche-lobe filling)
+    type: float
+    tip: Secondary's volume-equivalent radius. Leave blank/0 (the default), or any
+      value at or above the (a priori unknown) Roche-lobe-filling radius, for the
+      normal Roche-lobe-filling secondary -- too-large values are automatically clipped
+      to exactly filling, so there's no need to know that radius in advance. A smaller
+      value makes it underfill its Roche lobe (no L1 cusp), which also disables the
+      disc, accretion stream, and hot spot entirely -- there's no Roche-lobe overflow
+      to feed them
+    default: '0.0'
+  - flag: --T_2
+    label: effective temperature T_2 [K]
+    type: float
+    tip: T_2
+    default: '3000'
+  - flag: --u_2
+    label: limb-darkening coefficient u_2
+    type: float
+    tip: 'Linear law: I = I0*(1-u+u*mu); 0 = no limb darkening. Only affects the secondary''s
+      own observer-facing flux, not how much it absorbs -- safe to change even when
+      reusing a saved irradiation cache'
+    default: '0.4'
+  - flag: --beta_grav
+    label: gravity-darkening exponent beta_grav
+    type: float
+    tip: beta_grav (Lucy 1967); default 0.08 if left blank
+    default: '0.08'
+  - flag: --n_areas_2
+    label: number of surface elements
+    type: int
+    tip: Number of roughly equal-area surface sample points used for the secondary
+      (see roche.RocheLobe.equal_area_sample), shared by every output
+    default: '10000'
+- title: DISC
+  arguments:
+  - flag: --R_in
+    label: inner radius R_in [units of a]
+    type: float
+    tip: R_in
+    default: '0.16'
+  - flag: --R_out
+    label: outer radius R_out [units of a]
+    type: float
+    tip: R_out (semi-major axis if e_d>0)
+    default: '0.31'
+  - flag: --T_0
+    label: temperature at R_in T_0 [K]
+    type: float
+    tip: T_0
+    default: '6000'
+  - flag: --beta_d
+    label: temperature power-law index beta_d
+    type: float
+    tip: 'beta_d: T_d(R) = T_0*(R/R_in)^beta_d'
+    default: '0'
+  - flag: --alpha_d
+    label: half-opening angle alpha_d [deg]
+    type: float
+    tip: alpha_d from the midplane; 0 = geometrically flat disc
+    default: '2.'
+  - flag: --e_d
+    label: disc eccentricity e_d
+    type: float
+    tip: e_d; 0 = circular
+    default: '0.0'
+  - flag: --omega_d
+    label: periastron orientation omega_d [deg]
+    type: float
+    tip: omega_d
+    default: '0.0'
+  - flag: --u_d
+    label: limb-darkening coefficient u_d
+    type: float
+    tip: 'Linear law: I = I0*(1-u+u*mu); 0 = no limb darkening. Also reduces how strongly
+      the disc irradiates the secondary, so it is baked into a saved irradiation cache
+      -- changing it after loading one is ignored with a warning'
+    default: '0.0'
+  - flag: --n_areas_d
+    label: number of surface elements
+    type: int
+    tip: Total number of roughly equal-area surface elements used for the disc, shared
+      by every output
+    default: '2000'
+  - type: text
+    text: "Disc structure and temperature model (ModelParams in params.py):\n    T_d(R)\
+      \ = T_0 * (R/R_in)^beta_d\ne_d/omega_d/alpha_d default to 0 (circular, flat\n\
+      disc) if left blank.\n"
+    flag: ''
+    label: ''
+- title: STREAM
+  arguments:
+  - flag: --T_h
+    label: hot-spot peak temperature T_h [K]
+    type: float
+    tip: T_h
+    default: '50000'
+  - flag: --L_h
+    label: hot-spot decay length L_h [deg]
+    type: float
+    tip: L_h
+    default: '20'
+  - flag: --stream_angle
+    label: stream integration limit angle stream_angle [deg]
+    type: float
+    tip: How far around the primary (cumulative swept azimuth, 180=directly behind
+      the primary, may exceed 360 to loop around more than once) the ballistic stream
+      is integrated before stopping -- see stream.integrate_stream. Leave blank to
+      keep the default (stop at the trajectory's first closest approach to the primary,
+      or a disc impact if reached first). Every stream integration prints its closest
+      approach and final radius (units of a).
+    default: ''
+  - type: text
+    text: "Stream-impact hot spot on the outer disc rim:\n    T(phi) = max(T_d(rim(phi)),\
+      \ T_h * exp(-(phi-phi_h)/L_h))\nphi_h (the impact azimuth) is not a free parameter\
+      \ -- it's\nderived from q and the disc geometry above.\n"
+    flag: ''
+    label: ''
+- title: OUTPUT
+  arguments:
+  - flag: --outputs
+    label: outputs
+    type: choice
+    choices:
+    - outline
+    - temperature
+    - intensity
+    - lightcurve
+    - magnitude
+    - shadow
+    - rv
+    default: outline
+  - flag: --show
+    label: show interactively (don't save)
+    type: bool
+    tip: Display each output in a window instead of writing it to --outdir
+    default: true
+  - flag: --show-points
+    label: show sample points (outline)
+    type: bool
+    tip: In the outline output, scatter each body's actual rendering sample points
+      (at their --n_areas_* resolutions) to judge visually whether that resolution
+      is dense enough
+    default: false
+  - flag: --outdir
+    label: output directory
+    type: dir
+    default: demo_output
+  - flag: --save-irradiation
+    label: save irradiation cache to
+    type: str
+    tip: Write the (expensive) temperature-map calculation to this FITS path, for
+      reuse via 'Load irradiation cache from' below -- e.g. more light curves/renders
+      at other phases or wavelengths without recomputing irradiation
+    default: ''
+  - flag: --load-irradiation
+    label: load irradiation cache from
+    type: file
+    tip: Load a previously-saved irradiation cache instead of recomputing it. Only
+      Wavelength and the secondary's limb-darkening coefficient may still safely override
+      the loaded values; anything else that would change the cached irradiation (including
+      the primary's/disc's limb-darkening coefficients) is ignored with a warning
+    default: ''
+- title: DATA
+  arguments:
+  - flag: --ph_off
+    label: photometric/rv phase offset ph_off
+    type: float
+    tip: Subtracted from the observed data's phase column (photometric or RV) before
+      overlay/fitting, to correct for a bad ephemeris in the data (fraction of P_orb)
+    default: ''
+  - flag: --data-file
+    label: photometric data file (CSV or FITS)
+    type: file
+    tip: Overlay these observed (phase, flux or magnitude, error) points on the light-curve/magnitude
+      plot
+    default: ''
+  - flag: --data-phase-col
+    label: photometric phase column
+    type: str
+    default: ''
+  - flag: --data-flux-col
+    label: photometric flux column
+    type: str
+    tip: Used unless Photometric magnitude column below is set
+    default: ''
+  - flag: --data-mag-col
+    label: photometric magnitude column
+    type: str
+    tip: Alternative to Photometric flux column above -- give exactly one of the two
+    default: ''
+  - flag: --data-err-col
+    label: photometric error column
+    type: str
+    tip: Uncertainty on whichever of Photometric flux column/Photometric magnitude
+      column is actually used, in the same units as that column
+    default: ''
+  - flag: --data_norm
+    label: photometric normalisation/magnitude offset
+    type: float
+    tip: Applied to Photometric data file's own values before comparing/overlaying
+      -- a multiplicative flux factor (flux = table_flux*data_norm) if Photometric
+      flux column is used, or an additive magnitude offset (mag = table_mag+data_norm)
+      if Photometric magnitude column is used, for data that's normalized/relative
+      rather than already on the model's absolute scale
+    default: ''
+  - flag: --data-rv-file
+    label: RV data file (CSV or FITS)
+    type: file
+    tip: Table of observed radial-velocity data, for the rv output overlay/fit --
+      defaults to Observed data file above if left blank (a single table with both
+      photometric and RV columns)
+    default: ''
+  - flag: --data-rv-phase-col
+    label: RV data phase column
+    type: str
+    default: ''
+  - flag: --data_rv_1_col
+    label: RV data column (primary)
+    type: str
+    tip: Observed primary radial velocity [km/s] -- enables that component's overlay/fit;
+      leave blank to disable
+    default: ''
+  - flag: --data_rv_1_err_col
+    label: RV data error column (primary)
+    type: str
+    default: ''
+  - flag: --data_rv_2_col
+    label: RV data column (secondary)
+    type: str
+    tip: Observed secondary radial velocity [km/s] -- the usual source of a CV's measured
+      RV curve (absorption lines from the donor star)
+    default: ''
+  - flag: --data_rv_2_err_col
+    label: RV data error column (secondary)
+    type: str
+    default: ''
+  - flag: --data_rv_stream_col
+    label: RV data column (accretion stream)
+    type: str
+    default: ''
+  - flag: --data_rv_stream_err_col
+    label: RV data error column (accretion stream)
+    type: str
+    default: ''
+  - flag: --data_rv_hotspot_col
+    label: RV data column (magnetic/hotspot)
+    type: str
+    tip: Observed radial velocity of the magnetically-channeled accretion stream (see
+      PRIMARY tab's Accretion connection radius)
+    default: ''
+  - flag: --data_rv_hotspot_err_col
+    label: RV data error column (magnetic/hotspot)
+    type: str
+    default: ''
+  - flag: --data_rv_gamma
+    label: systemic (gamma) velocity [km/s]
+    type: float
+    tip: Added to every model RV curve before comparing to any RV data column above
+      -- the model itself has zero systemic velocity. Fittable via FIT tab as 'rv_gamma'
+    default: ''
+- title: FIT
+  arguments:
+  - flag: --lsq_fit
+    label: least-squares fit parameters
+    type: str
+    tip: 'Comma-separated parameter names to fit by least squares against Observed
+      data file and/or any active RV data column (jointly if more than one), e.g.
+      "ph_off,dist" -- requires at least one of those; starts from each parameter''s
+      current value and updates it in place to the best fit before any output is produced.
+      Fittable names -- System: P_orb (period [d]), a (separation [m]), q (mass ratio
+      M2/M1), R_1 (primary radius), T_1/T_2 (temperatures [K]), incl (inclination
+      [deg]), wavelength [A], u_1/u_2 (limb-darkening coefficients), R_2 (secondary
+      radius, 0=lobe-filling), ph_off (phase offset), theta_1/phi_1 (magnetic obliquity/azimuth
+      [deg]). Disc/spot: R_in/R_out (disc radii), T_0 (disc temperature at R_in),
+      beta_d (disc temperature index), T_h/L_h (hot-spot peak temperature/decay length),
+      beta_grav (secondary gravity darkening), e_d/omega_d/alpha_d (disc eccentricity/periastron/opening
+      angle), u_d (disc limb darkening), angle_acc (accretion connection angle), spot_acc
+      (accretion spot radius), T_acc/u_acc (accretion spot temperature/limb darkening).
+      Pseudo-parameters: dist (observer distance [pc]), data_norm (data normalisation/magnitude
+      offset), rv_gamma (systemic velocity [km/s])'
+    default: ''
+  - flag: --mcmc_fit
+    label: MCMC fit parameters
+    type: str
+    tip: Same syntax as Least-squares fit parameters above, but fit by MCMC (emcee)
+      instead -- mutually exclusive with it. Walks Walkers-per-parameter*<n parameters>
+      walkers for Burn-in steps then Sample steps, and uses each parameter's median
+      posterior value as the fit result
+    default: ''
+  - flag: --nburn
+    label: MCMC burn-in steps
+    type: int
+    tip: Discarded before sampling; only meaningful if MCMC fit parameters above is
+      set
+    default: '500'
+  - flag: --nsample
+    label: MCMC sample steps
+    type: int
+    tip: Kept for the posterior, after burn-in; only meaningful if MCMC fit parameters
+      above is set
+    default: '1000'
+  - flag: --walkers
+    label: MCMC walkers per parameter
+    type: int
+    tip: Total walker count is this times the number of MCMC fit parameters; only
+      meaningful if MCMC fit parameters above is set
+    default: '5'
+  - flag: --spread
+    label: MCMC walker starting spread
+    type: float
+    tip: Relative dispersion of each walker's starting position around its parameter's
+      initial value -- just needs to seed a small, non-degenerate cloud for the sampler
+      to diffuse outward from during burn-in, not already span the true posterior
+      width; only meaningful if MCMC fit parameters above is set
+    default: '0.01'
+  - flag: --corner_plot
+    label: MCMC corner plot
+    type: bool
+    tip: Also produce a corner.py posterior pairwise-correlation plot; only meaningful
+      if MCMC fit parameters above is set
+    default: false
+- title: MISC
+  arguments:
+  - flag: --no-irradiate
+    label: disable irradiation calculation
+    type: bool
+    tip: Gravity darkening only -- skips the (expensive) disc/star irradiation calculation
+      entirely. Applies to every temperature build, not just the initial one, so it
+      also speeds up lsq_fit/mcmc_fit trials that would otherwise rebuild it from
+      scratch each time. No effect together with Load irradiation cache from below
+      -- a loaded cache's own irradiation is always used exactly as saved, regardless
+      of this flag
+    default: false
+  - flag: --workers
+    label: light-curve worker processes
+    type: int
+    tip: Split the light-curve phase loop across this many processes. Default 1 (serial)
+      -- only worth raising once the phase loop takes more than about a second; a
+      low-resolution/few-phase preview can finish before a process pool even starts
+      up
+    default: '1'
+  - flag: --pixelmapping
+    label: pixel mapping (temperature render)
+    type: choice
+    choices:
+    - direct
+    - indirect
+    default: direct
+    tip: 'direct: splat each sample across every pixel its own area covers, depth-buffered
+      (slower, no holes). indirect: scatter each surface sample into one pixel (faster,
+      can leave holes).'
+  - flag: --image-size
+    label: output image size (WxH pixels)
+    type: str
+    tip: Output image pixel dimensions, WIDTHxHEIGHT, e.g. 1280x720 or 1200x900. Applies
+      to all three output figures.
+    default: 1280x720
+  - flag: --vmin
+    label: colorbar min (temperature/intensity render)
+    type: float
+    tip: Leave blank to use the rendered data's own minimum. Units are K for the temperature
+      render, W/m^2/sr/m for the intensity render -- whichever is actually produced.
+      The primary usually dominates the intensity scale by orders of magnitude, so
+      clipping this (and/or the max below) is usually necessary to see limb-darkening
+      effects on the fainter bodies there
+    default: ''
+  - flag: --vmax
+    label: colorbar max (temperature/intensity render)
+    type: float
+    tip: Leave blank to use the rendered data's own maximum
+    default: ''
+  - flag: --bounds
+    label: fixed plot bounds (sky-plane) xleft,xright,ybottom,ytop
+    type: str
+    tip: Applied to the outline/temperature/intensity outputs' X/Y axes (not shadow,
+      which uses its own face-on frame) -- equal x/y scaling is always kept, so this
+      also sets the plotted region's shape. Leave blank for each output's own default
+      behavior -- outline autoscales to whatever's currently visible (can drift phase
+      to phase, e.g. across a movie's frames); temperature/intensity already use a
+      phase-independent envelope. Useful for a movie's consistent field of view, or
+      to crop in on a region, e.g. '-1.2,1.2,-0.8,0.8'
+    default: ''

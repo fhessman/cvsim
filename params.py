@@ -135,13 +135,16 @@ class ModelParams:
     omega_d: float = 0.0             # disc periastron orientation [deg]
     alpha_d: float = 0.0             # disc half-opening angle from midplane [deg] (0 = flat)
     u_d: float = 0.0                 # disc limb-darkening coefficient (linear law), 0=off
-    r_acc: float = None               # primary-centered radius, units of a, where the
-                                       # accretion stream connects to a magnetic field line
-                                       # (magnetic CV accretion spot; see magnetic.py). None
-                                       # (default) = feature off -- unlike T_h/L_h's disc hot
-                                       # spot, angle_acc/T_acc below already have real
-                                       # defaults, so r_acc alone gates has_accretion_spot.
-    angle_acc: float = 5.0            # accretion spot's angular radius on the primary's
+    angle_acc: float = None           # cumulative swept azimuth [deg] at which the ballistic
+                                       # stream connects to a magnetic field line (magnetic CV
+                                       # accretion spot; see magnetic.py) -- same convention as
+                                       # --stream_angle (0=facing secondary, 180=directly behind
+                                       # the primary, may exceed 360 to loop around more than
+                                       # once; see stream.integrate_stream/angle_acc_index).
+                                       # None (default) = feature off -- unlike T_h/L_h's disc
+                                       # hot spot, spot_acc/T_acc below already have real
+                                       # defaults, so angle_acc alone gates has_accretion_spot.
+    spot_acc: float = 5.0             # accretion spot's angular radius on the primary's
                                        # surface around the field line's footpoint [deg]
     T_acc: float = 100000.0           # accretion spot temperature [K]
     u_acc: float = 0.0                # accretion spot limb-darkening coefficient (linear
@@ -161,8 +164,8 @@ class ModelParams:
         return np.radians(self.alpha_d)
 
     @property
-    def angle_acc_rad(self):
-        return np.radians(self.angle_acc)
+    def spot_acc_rad(self):
+        return np.radians(self.spot_acc)
 
     @property
     def has_disc(self):
@@ -179,13 +182,13 @@ class ModelParams:
 
     @property
     def has_accretion_spot(self):
-        """True only if r_acc was actually given -- see r_acc's own
-        comment for why it alone gates this (angle_acc/T_acc already have
-        real defaults). Does NOT check T_acc>T_1 or r_acc against the
-        stream's minimum approach -- those need the built lobe/stream
-        trajectory, so they're checked (and reported) in
+        """True only if angle_acc was actually given -- see angle_acc's own
+        comment for why it alone gates this (spot_acc/T_acc already have
+        real defaults). Does NOT check T_acc>T_1 or whether angle_acc is
+        ever actually reached by the stream trajectory -- those need the
+        built lobe/stream trajectory, so they're checked (and reported) in
         render.build_temperature_maps instead."""
-        return self.r_acc is not None
+        return self.angle_acc is not None
 
 
 def build_system(system: SystemParams, model: ModelParams, ntheta=181, nphi=361):
@@ -286,8 +289,8 @@ _HEADER_FIELDS = {
     "OMEGADSC": ("model", "omega_d", "deg, disc periastron orientation"),
     "OPENANG": ("model", "alpha_d", "deg, disc half-opening angle from midplane"),
     "U_DISC": ("model", "u_d", "disc limb-darkening coefficient (linear law)"),
-    "R_ACC": ("model", "r_acc", "units of a, accretion-spot connection radius"),
-    "ANGLACC": ("model", "angle_acc", "deg, accretion spot angular radius"),
+    "ANGLACC": ("model", "angle_acc", "deg, stream angle at field-line connection"),
+    "SPOTACC": ("model", "spot_acc", "deg, accretion spot angular radius"),
     "T_ACC": ("model", "T_acc", "K, accretion spot temperature"),
     "U_ACC": ("model", "u_acc", "accretion spot limb-darkening coeff (linear)"),
 }
@@ -404,10 +407,10 @@ def load_yaml(path):
     # cast explicitly: PyYAML only recognizes scientific notation as a
     # float when the exponent has an explicit sign (5e+8, not 5e8), so an
     # easy-to-write config can otherwise silently hand a *string* to a
-    # numeric field. r_acc alone may be a comma-separated list (see
-    # _parse_r_acc_values) -- _cast_field takes just its first value,
-    # same as an explicit --r_acc CLI override would (see
-    # raw_r_acc_from_config for recovering the rest).
+    # numeric field. angle_acc alone may be a comma-separated list (see
+    # _parse_angle_acc_values) -- _cast_field takes just its first value,
+    # same as an explicit --angle_acc CLI override would (see
+    # raw_angle_acc_from_config for recovering the rest).
     sys_kwargs = {n: (_cast_field(n, v) if v is not None else None) for n, v in data.get("system", {}).items()}
     model_kwargs = {n: (_cast_field(n, v) if v is not None else None) for n, v in data.get("model", {}).items()}
     return SystemParams(**sys_kwargs), ModelParams(**model_kwargs)
@@ -418,13 +421,14 @@ def _cast_field(name, value):
     Cast one SystemParams/ModelParams field's raw config value (a YAML
     scalar, possibly a string -- see load_yaml/_params_from_gui_config)
     to what the dataclass actually stores: a plain float for every field
-    except r_acc, which may be a comma-separated list (_parse_r_acc_values)
-    -- only its first value is a real ModelParams.r_acc (see
-    raw_r_acc_from_config for recovering a config-provided list the same
-    way an explicit --r_acc CLI override's extra entries are).
+    except angle_acc, which may be a comma-separated list
+    (_parse_angle_acc_values) -- only its first value is a real
+    ModelParams.angle_acc (see raw_angle_acc_from_config for recovering a
+    config-provided list the same way an explicit --angle_acc CLI
+    override's extra entries are).
     """
-    if name == "r_acc":
-        return float(_parse_r_acc_values(str(value))[0])
+    if name == "angle_acc":
+        return float(_parse_angle_acc_values(str(value))[0])
     return float(value)
 
 
@@ -446,30 +450,31 @@ def _params_from_gui_config(data):
     return SystemParams(**sys_kwargs), ModelParams(**model_kwargs)
 
 
-def raw_r_acc_from_config(path):
+def raw_angle_acc_from_config(path):
     """
-    Re-read --r_acc's raw value directly from a YAML config file (either
-    format load_yaml accepts) -- bypassing load_yaml/_cast_field's "only
-    the first value" reduction, which is what every other consumer of a
-    loaded ModelParams needs, but not what simulate.py wants for its
-    "outline" output's extra accretion spots/field lines: an --r_acc list
-    given as a config file's own default (not an explicit CLI override)
-    is otherwise invisible past ModelParams.r_acc's single float.
+    Re-read --angle_acc's raw value directly from a YAML config file
+    (either format load_yaml accepts) -- bypassing load_yaml/_cast_field's
+    "only the first value" reduction, which is what every other consumer
+    of a loaded ModelParams needs, but not what simulate.py wants for its
+    "outline" output's extra accretion spots/field lines: an --angle_acc
+    list given as a config file's own default (not an explicit CLI
+    override) is otherwise invisible past ModelParams.angle_acc's single
+    float.
 
-    Returns a float array (see _parse_r_acc_values), or None if the file
-    doesn't set r_acc at all.
+    Returns a float array (see _parse_angle_acc_values), or None if the
+    file doesn't set angle_acc at all.
     """
     with open(path) as f:
         data = yaml.safe_load(f) or {}
     if "panes" in data:
         for pane in data.get("panes", []):
             for arg in pane.get("arguments", []):
-                if arg.get("flag", "").lstrip("-") == "r_acc":
+                if arg.get("flag", "").lstrip("-") == "angle_acc":
                     default = arg.get("default", "")
-                    return _parse_r_acc_values(str(default)) if default not in ("", None) else None
+                    return _parse_angle_acc_values(str(default)) if default not in ("", None) else None
         return None
-    raw = data.get("model", {}).get("r_acc")
-    return _parse_r_acc_values(str(raw)) if raw is not None else None
+    raw = data.get("model", {}).get("angle_acc")
+    return _parse_angle_acc_values(str(raw)) if raw is not None else None
 
 
 # ---- command-line interface ----
@@ -507,20 +512,23 @@ _FIELD_HELP = {
     "omega_d": "disc periastron orientation [deg]",
     "alpha_d": "disc half-opening angle from midplane [deg] (0 = flat)",
     "u_d": "disc limb-darkening coefficient (linear law); 0=off",
-    "r_acc": "primary-centered radius [units of a] where the accretion stream connects "
-             "to a magnetic field line (magnetic CV accretion spot); unset (default) "
-             "disables the feature. Ignored with a warning if smaller than the "
-             "stream's minimum approach to the primary. May be a comma-separated list "
-             "(e.g. 0.1,0.15,0.2) for multiple accretion spots -- one per radius, each "
-             "drawn as its own field line in the outline output and heating its own "
-             "patch of the primary (sharing angle_acc/T_acc/u_acc). Only the first "
-             "value is used for --lsq_fit/the FITS header round-trip",
-    "angle_acc": "accretion spot's angular radius on the primary's surface around the "
-                 "field line's footpoint [deg]; only meaningful if r_acc is set",
-    "T_acc": "accretion spot temperature [K]; only meaningful if r_acc is set. Ignored "
+    "angle_acc": "cumulative swept azimuth [deg] at which the ballistic stream connects "
+                 "to a magnetic field line (magnetic CV accretion spot) -- same "
+                 "convention as --stream_angle (0=facing secondary, 180=directly behind "
+                 "the primary, may exceed 360 to loop around more than once; see "
+                 "stream.integrate_stream/angle_acc_index). Unset (default) disables the "
+                 "feature. Ignored with a warning if the stream trajectory never actually "
+                 "sweeps that far. May be a comma-separated list (e.g. 90,150,200) for "
+                 "multiple accretion spots -- one per angle, each drawn as its own field "
+                 "line in the outline output and heating its own patch of the primary "
+                 "(sharing spot_acc/T_acc/u_acc). Only the first value is used for "
+                 "--lsq_fit/the FITS header round-trip",
+    "spot_acc": "accretion spot's angular radius on the primary's surface around the "
+                "field line's footpoint [deg]; only meaningful if angle_acc is set",
+    "T_acc": "accretion spot temperature [K]; only meaningful if angle_acc is set. Ignored "
              "with a warning if not hotter than T_1",
     "u_acc": "accretion spot limb-darkening coefficient (linear law, I=I0*(1-u+u*mu)); "
-             "independent of u_1; only meaningful if r_acc is set. Negative values give "
+             "independent of u_1; only meaningful if angle_acc is set. Negative values give "
              "limb-brightening instead of darkening, a crude stand-in for cyclotron beaming",
 }
 
@@ -528,56 +536,57 @@ _SYSTEM_FIELDS = [f.name for f in dataclasses.fields(SystemParams)]
 _MODEL_FIELDS = [f.name for f in dataclasses.fields(ModelParams)]
 
 
-def _parse_r_acc_values(s):
+def _parse_angle_acc_values(s):
     """
-    Shared parsing for --r_acc's value, wherever it comes from (the CLI,
-    via _parse_r_acc below, or a YAML config's own r_acc/default, via
-    raw_r_acc_from_config): a single float, or a comma-separated list of
-    floats (e.g. '0.1,0.15,0.2') -- see _FIELD_HELP['r_acc']. Always
-    returns a 1D float array (length 1 for a single value). Raises a
-    plain ValueError on a malformed value -- callers wrap that in
-    whatever's appropriate for their own context (argparse.ArgumentTypeError
-    for _parse_r_acc, a SystemExit for raw_r_acc_from_config).
+    Shared parsing for --angle_acc's value, wherever it comes from (the
+    CLI, via _parse_angle_acc below, or a YAML config's own
+    angle_acc/default, via raw_angle_acc_from_config): a single float, or
+    a comma-separated list of floats (e.g. '90,150,200') -- see
+    _FIELD_HELP['angle_acc']. Always returns a 1D float array (length 1
+    for a single value). Raises a plain ValueError on a malformed value --
+    callers wrap that in whatever's appropriate for their own context
+    (argparse.ArgumentTypeError for _parse_angle_acc, a SystemExit for
+    raw_angle_acc_from_config).
     """
     values = [float(v) for v in s.split(",") if v.strip() != ""]
     if not values:
-        raise ValueError(f"empty --r_acc value: {s!r}")
+        raise ValueError(f"empty --angle_acc value: {s!r}")
     return np.array(values)
 
 
-def _parse_r_acc(s):
+def _parse_angle_acc(s):
     """
-    --r_acc's CLI type: see _parse_r_acc_values. The caller
+    --angle_acc's CLI type: see _parse_angle_acc_values. The caller
     (simulate.py's main()) pulls out the first entry for
-    ModelParams.r_acc (every other --r_acc-touching thing -- --lsq_fit,
-    the FITS header round-trip -- only ever sees that single float,
-    unchanged from before this list-supporting type existed) and treats
-    every entry, including that first one, as its own accretion spot:
-    one heated patch (and one drawn field line, in simulate.py's
-    "outline" output) per radius, all sharing ModelParams'
-    angle_acc/T_acc/u_acc.
+    ModelParams.angle_acc (every other --angle_acc-touching thing --
+    --lsq_fit, the FITS header round-trip -- only ever sees that single
+    float, unchanged from before this list-supporting type existed) and
+    treats every entry, including that first one, as its own accretion
+    spot: one heated patch (and one drawn field line, in simulate.py's
+    "outline" output) per angle, all sharing ModelParams'
+    spot_acc/T_acc/u_acc.
     """
     try:
-        return _parse_r_acc_values(s)
+        return _parse_angle_acc_values(s)
     except ValueError:
         raise argparse.ArgumentTypeError(
-            f"--r_acc must be a float or comma-separated list of floats, got {s!r}")
+            f"--angle_acc must be a float or comma-separated list of floats, got {s!r}")
 
 
 def add_param_args(parser):
     """
     Register --config plus one --<field> flag per SystemParams/ModelParams
     field (all float-valued, default None so "not given on the command
-    line" is distinguishable from "given as 0" -- except --r_acc, which
-    takes a comma-separated list, see _parse_r_acc). Call params_from_args
-    on the resulting namespace to resolve config-file + CLI-override
-    values into a (SystemParams, ModelParams) pair.
+    line" is distinguishable from "given as 0" -- except --angle_acc,
+    which takes a comma-separated list, see _parse_angle_acc). Call
+    params_from_args on the resulting namespace to resolve config-file +
+    CLI-override values into a (SystemParams, ModelParams) pair.
     """
     parser.add_argument("--config", type=str, default=None,
                          help="YAML file with 'system'/'model' sections "
                               "(base values; the flags below override it)")
     for name in _SYSTEM_FIELDS + _MODEL_FIELDS:
-        parser.add_argument(f"--{name}", type=(_parse_r_acc if name == "r_acc" else float),
+        parser.add_argument(f"--{name}", type=(_parse_angle_acc if name == "angle_acc" else float),
                              default=None, help=_FIELD_HELP.get(name, name))
     return parser
 

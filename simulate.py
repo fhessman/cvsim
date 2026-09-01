@@ -15,7 +15,8 @@ output file per phase -- a sequence when --phase-num>1 -- each named
 (outline), "render" (temperature image), or "intensity" (band_intensity
 image -- the one to use for checking limb-darkening effects visually, see
 --u_1/--u_2/--u_d); prefix is --prefix if given, else the --config file's
-basename, else omitted. "lightcurve", "magnitude", "shadow", and "rv"
+basename, else omitted -- same value (blanks intact) is also shown as
+every output plot's title. "lightcurve", "magnitude", "shadow", and "rv"
 instead always plot every phase together on one plot each
 (<prefix>_<kind>.png, no phase suffix). "rv" is the system's radial-
 velocity curve -- see render.radial_velocity_curve. "lightcurve" and
@@ -59,13 +60,15 @@ same field from --config.
 import argparse
 import dataclasses
 import os
+import re
 import sys
 
 import numpy as np
 
-from params import (add_param_args, params_from_args, build_system, raw_r_acc_from_config,
+from params import (add_param_args, params_from_args, build_system, raw_angle_acc_from_config,
                      _SYSTEM_FIELDS, _MODEL_FIELDS)
-from stream import integrate_stream, closest_approach_index, sample_points
+from stream import (integrate_stream, closest_approach_index, angle_acc_index, sample_points,
+                     impact_azimuth)
 
 # SystemParams/ModelParams fields that render.physical_light_curve takes as
 # live, per-call arguments even when reusing an already-built temp_maps --
@@ -92,7 +95,7 @@ IMAGE_DPI = 100  # fixed, so (width_px, height_px) maps to figsize unambiguously
 # semi-amplitude) notation from the spectroscopic-binary literature;
 # "hotspot" names what render.py itself calls "magnetic" (the
 # magnetically-channeled continuation of the stream, see
-# build_temperature_maps' r_acc) in the more observationally-familiar term
+# build_temperature_maps' angle_acc) in the more observationally-familiar term
 # for where that emission actually comes from.
 RV_DATA_COMPONENTS = (
     ("1", "primary", "#2e6f95"),
@@ -105,8 +108,27 @@ RV_DATA_COMPONENTS = (
 def _output_path(outdir, prefix, kind, phase=None, ext="png"):
     parts = [p for p in (prefix, kind) if p]
     if phase is not None:
-        parts.append(f"{phase:.3f}")
+        parts.append(f"{phase:.6f}")
     return os.path.join(outdir, "_".join(parts) + "." + ext)
+
+
+def _prefix_and_title_label(args):
+    """
+    --prefix (SYSTEM tab's global label; defaults to --config's basename,
+    same as always) doubles as both the output filename prefix and every
+    plot's title. Returns (prefix, title_label): `title_label` is the
+    human-readable form (blanks intact) used for titles, `prefix` is the
+    filesystem-safe form (any run of whitespace collapsed to a single "_")
+    used in _output_path -- the only one of the two that ever touches a
+    path.
+    """
+    prefix = args.prefix
+    if prefix is None and args.config:
+        prefix = os.path.splitext(os.path.basename(args.config))[0]
+    title_label = prefix
+    if prefix:
+        prefix = re.sub(r"\s+", "_", prefix.strip())
+    return prefix, title_label
 
 
 def _save_lightcurve_fits(path, phases, star, discf, sec, total, system, model, args,
@@ -152,6 +174,38 @@ def _save_lightcurve_fits(path, phases, star, discf, sec, total, system, model, 
     fits.HDUList([fits.PrimaryHDU(header=hdr), table_hdu]).writeto(path, overwrite=True)
 
 
+def _print_table_preview(path, columns):
+    """
+    Print an astropy.table-like preview of a just-loaded data table:
+    column headers, the first 20 rows, an elision line ("..."), then the
+    last 20 rows -- so a data-loading mistake (wrong column, misparsed
+    row, bad delimiter) is visible immediately in the console rather than
+    only showing up much later as an inexplicable fit/plot result.
+
+    columns: {label: array} for exactly the columns that were actually
+    extracted (not necessarily every column in the file) -- reflects what
+    the rest of the run will actually use. Tables of 40 rows or fewer are
+    printed in full (no elision needed).
+    """
+    from astropy.table import Table
+
+    table = Table(columns)
+    n = len(table)
+    print(f"-- {path}: {n} row{'s' if n != 1 else ''} read --")
+    lines = table.pformat(max_lines=-1, max_width=-1)
+    if n <= 40:
+        print("\n".join(lines))
+    else:
+        # lines[0]/lines[1] are the column-name/dashes header rows (see
+        # astropy.table.Table.pformat), shared by both halves below so the
+        # column alignment stays consistent across the whole printout.
+        header, data_lines = lines[:2], lines[2:]
+        print("\n".join(header + data_lines[:20] + ["..."] + data_lines[-20:]))
+
+
+_lightcurve_data_cache = {}
+
+
 def _load_lightcurve_data(path, phase_col, value_col, err_col):
     """
     Read observed (phase, value, [error]) columns from a CSV or FITS
@@ -177,7 +231,20 @@ def _load_lightcurve_data(path, phase_col, value_col, err_col):
     For FITS, searches every HDU for the first table extension that has
     phase_col/value_col (and err_col, if given). Returns (phase, value,
     error-or-None) as float arrays.
+
+    Repeated calls with the same (path, phase_col, value_col, err_col) --
+    e.g. --lsq_fit/--mcmc_fit's _prepare_fit loading the same RV table
+    the "rv" output block then loads again for its own overlay -- reuse
+    the first call's already-read arrays (each caller still gets its own
+    copy, safe to modify) instead of re-reading the file and printing the
+    same _print_table_preview a second time.
     """
+    key = (os.path.abspath(path), phase_col, value_col, err_col or "")
+    cached = _lightcurve_data_cache.get(key)
+    if cached is not None:
+        phase, value, err = cached
+        return phase.copy(), value.copy(), (err.copy() if err is not None else None)
+
     ext = os.path.splitext(path)[1].lower()
     required = [phase_col, value_col] + ([err_col] if err_col else [])
     if ext == ".fits":
@@ -210,7 +277,12 @@ def _load_lightcurve_data(path, phase_col, value_col, err_col):
         err = np.array([float(r[err_col]) for r in rows]) if err_col else None
     else:
         raise ValueError(f"--data-file must be .csv or .fits, got {path!r}")
-    return phase, value, err
+    cols = {phase_col: phase, value_col: value}
+    if err is not None:
+        cols[err_col] = err
+    _print_table_preview(path, cols)
+    _lightcurve_data_cache[key] = (phase, value, err)
+    return phase.copy(), value.copy(), (err.copy() if err is not None else None)
 
 
 def _wrap_extend_phase(phase, phase_min, phase_max):
@@ -281,7 +353,7 @@ def _parse_fit_names(param_str, flag_name):
 
 
 def _prepare_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
-                  n_primary, n_disc, irradiate, ntheta, nphi, r_acc_list, names, groups, flag_name):
+                  n_primary, n_disc, irradiate, ntheta, nphi, angle_acc_list, names, groups, flag_name):
     """
     Shared machinery for --lsq_fit/--mcmc_fit: loads --data-file and/or
     --data-rv-file once, and builds the closures both fitting methods
@@ -299,12 +371,12 @@ def _prepare_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
     lobe/disc/temp_maps rebuilt from scratch every trial, since those are
     baked into temp_maps at build time; slower, but correct.
 
-    r_acc_list: every --r_acc entry (see params._parse_r_acc), if it's a
+    angle_acc_list: every --angle_acc entry (see params._parse_angle_acc), if it's a
     list of more than one -- only its first entry ever varies here (as
-    "r_acc", if that's a fit parameter; model.r_acc/model2.r_acc only
-    ever hold that one value, see params._parse_r_acc's own docstring),
+    "angle_acc", if that's a fit parameter; model.angle_acc/model2.angle_acc only
+    ever hold that one value, see params._parse_angle_acc's own docstring),
     with any further entries rebuilt at their own fixed radius on every
-    trial, same as when r_acc isn't being fit at all.
+    trial, same as when angle_acc isn't being fit at all.
 
     Photometric (flux/mag) and RV data are independent, both-optional fit
     targets, and at least one must be given. --data-file enables the
@@ -392,13 +464,13 @@ def _prepare_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
             rv_data[curve_name] = (phase, value, err)
             n_obs += len(phase)
 
-    def effective_r_acc(model_):
-        # the trial's own model_.r_acc (possibly the current fit value)
-        # stands in for the list's first entry; any further --r_acc
+    def effective_angle_acc(model_):
+        # the trial's own model_.angle_acc (possibly the current fit value)
+        # stands in for the list's first entry; any further --angle_acc
         # entries stay fixed at whatever they were given as.
-        if r_acc_list is not None and len(r_acc_list) > 1:
-            return np.concatenate([[model_.r_acc], r_acc_list[1:]])
-        return model_.r_acc
+        if angle_acc_list is not None and len(angle_acc_list) > 1:
+            return np.concatenate([[model_.angle_acc], angle_acc_list[1:]])
+        return model_.angle_acc
 
     def start_value(name, group):
         if group == "dist":
@@ -439,8 +511,8 @@ def _prepare_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
             hotspot_T_h=model2.T_h if model2.has_hotspot else None,
             hotspot_L_h_deg=model2.L_h, n_sec=args.n_areas_2, n_disc=n_disc,
             u_disc=model2.u_d, u_primary=sys2.u_1, n_primary=n_primary,
-            theta_1=sys2.theta_1_rad, phi_1=sys2.phi_1_rad, r_acc=effective_r_acc(model2),
-            angle_acc=model2.angle_acc_rad, T_acc=model2.T_acc, u_acc=model2.u_acc,
+            theta_1=sys2.theta_1_rad, phi_1=sys2.phi_1_rad, angle_acc=effective_angle_acc(model2),
+            spot_acc=model2.spot_acc_rad, T_acc=model2.T_acc, u_acc=model2.u_acc,
             incl_deg=sys2.incl, stream_angle_deg=args.stream_angle)
         return lobe2, disc2, tm2
 
@@ -492,13 +564,13 @@ def _prepare_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
 
 
 def _run_lsq_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
-                  n_primary, n_disc, irradiate, ntheta, nphi, r_acc_list=None):
+                  n_primary, n_disc, irradiate, ntheta, nphi, angle_acc_list=None):
     """
     Least-squares fit of --lsq_fit's comma-separated parameter names
     against --data-file and/or any active --data_rv_*_col, via
     scipy.optimize.least_squares -- see _prepare_fit for the shared parameter-name syntax/semantics
     ('dist'/'data_norm'/'rv_gamma' pseudo-parameters, "cheap" vs. rebuilt
-    trials, r_acc_list). Start values come straight from each named
+    trials, angle_acc_list). Start values come straight from each named
     parameter's current (--config/CLI/default) value.
 
     Returns (system, model, dist, data_norm, rv_gamma, lobe, disc, temp_maps)
@@ -512,7 +584,7 @@ def _run_lsq_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
     names, groups = _parse_fit_names(args.lsq_fit, "--lsq_fit")
     x0, apply, residuals, rebuild, n_obs = _prepare_fit(
         args, system, model, lobe, disc, disc_teff_func, temp_maps,
-        n_primary, n_disc, irradiate, ntheta, nphi, r_acc_list, names, groups, "--lsq_fit")
+        n_primary, n_disc, irradiate, ntheta, nphi, angle_acc_list, names, groups, "--lsq_fit")
 
     result = least_squares(residuals, x0)
 
@@ -536,13 +608,13 @@ def _run_lsq_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
 
 
 def _run_mcmc_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
-                   n_primary, n_disc, irradiate, ntheta, nphi, r_acc_list, finish):
+                   n_primary, n_disc, irradiate, ntheta, nphi, angle_acc_list, finish):
     """
     MCMC fit of --mcmc_fit's comma-separated parameter names against
     --data-file and/or any active --data_rv_*_col, via emcee -- see
     _prepare_fit for the shared parameter-name syntax/semantics
     ('dist'/'data_norm'/'rv_gamma'
-    pseudo-parameters, "cheap" vs. rebuilt trials, r_acc_list), identical
+    pseudo-parameters, "cheap" vs. rebuilt trials, angle_acc_list), identical
     to --lsq_fit's own.
 
     Walks the posterior with --walkers*<number of fitted parameters>
@@ -550,7 +622,10 @@ def _run_mcmc_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
     --spread, default 1%) around each parameter's current (--config/CLI/
     default) value -- the same starting point --lsq_fit uses -- for
     --nburn steps (discarded as burn-in), then --nsample further steps
-    kept as the posterior sample.
+    kept as the posterior sample. Each step's walkers are evaluated across
+    --workers threads (default 1, i.e. serial) -- the main stop-gap for
+    slow fits, since a "cheap" fit's own per-walker cost is usually too
+    small to be worth a process pool's startup/pickling overhead.
     The likelihood is the same chi-squared _prepare_fit's residuals()
     computes (Gaussian errors: log L = -0.5*sum(residuals**2)); there's
     no prior beyond that (flat/improper, matching --lsq_fit's own
@@ -575,11 +650,12 @@ def _run_mcmc_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
     -- same shape/contract as _run_lsq_fit's return.
     """
     import emcee
+    from multiprocessing.pool import ThreadPool
 
     names, groups = _parse_fit_names(args.mcmc_fit, "--mcmc_fit")
     x0, apply, residuals, rebuild, n_obs = _prepare_fit(
         args, system, model, lobe, disc, disc_teff_func, temp_maps,
-        n_primary, n_disc, irradiate, ntheta, nphi, r_acc_list, names, groups, "--mcmc_fit")
+        n_primary, n_disc, irradiate, ntheta, nphi, angle_acc_list, names, groups, "--mcmc_fit")
 
     ndim = len(names)
     nwalkers = args.walkers * ndim
@@ -597,12 +673,24 @@ def _run_mcmc_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
     spread = np.where(x0 != 0.0, np.abs(x0), 1.0) * args.spread
     pos = x0 + spread * rng.standard_normal((nwalkers, ndim))
 
-    sampler = emcee.EnsembleSampler(nwalkers, ndim, log_probability)
+    # a real process Pool can't pickle log_probability/residuals -- they're
+    # closures over this call's own lobe/disc/temp_maps, not top-level
+    # functions -- so a thread pool is used instead; numpy releases the GIL
+    # during its own C-level work, so this still parallelizes the walkers'
+    # per-step evaluations across --workers threads
+    pool = ThreadPool(args.workers) if args.workers > 1 else None
+    sampler = emcee.EnsembleSampler(nwalkers, ndim, log_probability, pool=pool)
     print(f"--mcmc_fit: {nwalkers} walkers ({args.walkers}/parameter), "
-          f"{args.nburn} burn-in + {args.nsample} sample steps")
-    state = sampler.run_mcmc(pos, args.nburn, progress=True)
-    sampler.reset()
-    sampler.run_mcmc(state, args.nsample, progress=True)
+          f"{args.nburn} burn-in + {args.nsample} sample steps"
+          + (f", {args.workers} worker threads" if pool is not None else ""))
+    try:
+        state = sampler.run_mcmc(pos, args.nburn, progress=True)
+        sampler.reset()
+        sampler.run_mcmc(state, args.nsample, progress=True)
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
 
     chain = sampler.get_chain(flat=True)
     medians = np.median(chain, axis=0)
@@ -621,6 +709,14 @@ def _run_mcmc_fit(args, system, model, lobe, disc, disc_teff_func, temp_maps,
     if args.corner_plot:
         import corner
         fig = corner.corner(chain, labels=names, truths=medians, show_titles=True)
+        # unlike every other output (see plots.labeled_title), a corner
+        # plot is an NxN grid of axes with no single "own" title to merge
+        # the global label into -- show_titles=True already puts each
+        # parameter's own fit result above its diagonal subplot -- so the
+        # label goes on a plain figure-level suptitle instead.
+        _, title_label = _prefix_and_title_label(args)
+        if title_label:
+            fig.suptitle(title_label)
         finish(fig, "corner")
 
     return rebuild(medians)
@@ -641,7 +737,87 @@ def _parse_image_size(s):
     return w, h
 
 
+def _splice_equals(argv, flag):
+    """
+    Work around argparse's "expected one argument" error when a flag's
+    value starts with '-' -- e.g. --bounds -1.2,1.5,-0.8,0.8: argparse
+    only recognizes a token as a value (rather than another option) when
+    it's ENTIRELY a bare negative number ("-1.2"), not a comma-separated
+    list merely starting with one, so it misidentifies the whole thing as
+    an attempted (unrecognized) option instead of --bounds' value.
+    Rewrites two argv entries ("--flag", "value") into one
+    ("--flag=value"), which argparse always accepts regardless of what
+    the value looks like -- a no-op if `flag` was already given that way,
+    or not given at all.
+    """
+    out = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == flag and i + 1 < len(argv):
+            out.append(f"{flag}={argv[i + 1]}")
+            i += 2
+        else:
+            out.append(argv[i])
+            i += 1
+    return out
+
+
+def _parse_bounds(s):
+    """Parse an 'xleft,xright,ybottom,ytop' sky-coordinate bounds string."""
+    parts = s.split(",")
+    try:
+        if len(parts) != 4:
+            raise ValueError
+        xleft, xright, ybottom, ytop = (float(p) for p in parts)
+        if not (xright > xleft and ytop > ybottom):
+            raise ValueError
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "--bounds must be xleft,xright,ybottom,ytop with xright>xleft and "
+            f"ytop>ybottom (e.g. -1.2,1.2,-0.8,0.8), got {s!r}")
+    return xleft, xright, ybottom, ytop
+
+
+def _hotspot_dphi_max(disc, model, phi_h, n_probe=2000, max_scales=20.0):
+    """
+    Downstream angular distance [deg] from phi_h at which the hot spot's
+    own T_h*exp(-dphi/L_h) formula (render.disc_surfaces_with_teff) drops
+    to (or below) the disc's own base temperature at that azimuth's rim
+    -- beyond this point the real max(T_base, hot) formula is just
+    T_base, i.e. no boost left at all, so stopping the outline's wedge
+    sequence (plots.disc_hotspot_wedges) there gives a physically
+    meaningful sense of how far the bright spot actually extends, rather
+    than an arbitrary fixed angular cutoff. Recomputes the disc's base
+    temperature directly from model.T_0/R_in/beta_d (render.
+    disc_powerlaw_teff) rather than reusing the model/system's own
+    disc_teff_func closure, which isn't available at all when
+    --load-irradiation supplied temp_maps straight from a cache.
+
+    Capped at max_scales*L_h if the crossing is never reached that far
+    out (e.g. an unrealistically hot/slow-decaying spot) -- probed at
+    n_probe points over [0, max_scales*L_h], not solved in closed form,
+    since disc_powerlaw_teff has no simple inverse.
+    """
+    from render import disc_powerlaw_teff
+
+    L_h = np.radians(model.L_h)
+    dphi = np.linspace(0.0, max_scales * L_h, n_probe)
+    hot = model.T_h * np.exp(-dphi / L_h)
+    T_base = disc_powerlaw_teff(disc.rim(phi_h + dphi), model.T_0, model.R_in, model.beta_d)
+    below = np.nonzero(hot <= T_base)[0]
+    dphi_max = dphi[below[0]] if len(below) else max_scales * L_h
+    return np.degrees(dphi_max)
+
+
 def main():
+    # stdout is fully block-buffered (not line-buffered) whenever it's not
+    # a terminal -- e.g. piped through gui.py's QProcess -- so without
+    # this, every "wrote <path>"/progress print below sits in Python's own
+    # internal buffer and only actually reaches the reader in one lump
+    # when the buffer fills or the process exits, instead of as each file
+    # is actually saved.
+    sys.stdout.reconfigure(line_buffering=True)
+
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_param_args(parser)
@@ -667,10 +843,18 @@ def main():
     parser.add_argument("--outdir", type=str, default="demo_output",
                          help="output directory (created if missing); ignored with --show")
     parser.add_argument("--prefix", type=str, default=None,
-                         help="output filename prefix; defaults to --config's basename "
-                              "(no prefix at all if neither is given)")
+                         help="global label for this run: shown as every output plot's title, "
+                              "and used (with any blanks replaced by '_') as the output "
+                              "filename prefix. Defaults to --config's basename "
+                              "(no prefix/title at all if neither is given)")
     parser.add_argument("--no-irradiate", action="store_true",
-                         help="disable secondary irradiation (cheaper preview)")
+                         help="skip the (expensive) irradiation flux calculation entirely -- "
+                              "every temperature build uses gravity darkening only, whether the "
+                              "initial one or (via --lsq_fit/--mcmc_fit) any not-'cheap' fit "
+                              "trial's own rebuild, so this can speed up fitting considerably. "
+                              "No effect together with --load-irradiation: a loaded cache's own "
+                              "irradiation (baked in when it was saved) is always used exactly "
+                              "as-is, regardless of this flag")
     parser.add_argument("--show", action="store_true",
                          help="display each output interactively instead of saving it to --outdir")
     parser.add_argument("--show-points", action="store_true",
@@ -715,9 +899,9 @@ def main():
                               "integrated before stopping -- see stream.integrate_stream. "
                               "Default (not given): stop at the trajectory's first closest "
                               "approach to the primary, as before. Every time the stream is "
-                              "integrated, its closest approach and final radius (in units "
-                              "of a) are printed, to help pick a --r_acc that actually "
-                              "connects to the trajectory")
+                              "integrated, its closest approach and final radius/angle are "
+                              "printed, to help pick a --angle_acc that actually connects to "
+                              "the trajectory")
     parser.add_argument("--image-size", type=_parse_image_size, default="1280x720",
                          help="output image pixel dimensions, as WIDTHxHEIGHT (e.g. 1280x720 "
                               "or 1200x900); applies to all three output figures")
@@ -732,6 +916,17 @@ def main():
                          help="colorbar maximum for whichever rendering is produced -- [K] for "
                               "temperature, [W/m^2/sr/m] for intensity (default: the rendered "
                               "data's own maximum)")
+    parser.add_argument("--bounds", type=_parse_bounds, default=None,
+                         help="fixed sky-plane plot bounds 'xleft,xright,ybottom,ytop' (units "
+                              "of a), applied to the outline/temperature/intensity outputs' X/Y "
+                              "axes (not 'shadow', which uses its own distinct face-on frame) "
+                              "-- equal x/y scaling is always kept, so these bounds also set the "
+                              "plotted region's shape. Default (not given): outline autoscales "
+                              "to whatever's actually visible (so its plotted area/shape can "
+                              "drift from phase to phase, e.g. across a movie's frames), and "
+                              "temperature/intensity already default to a phase-independent "
+                              "envelope (render.auto_extent) instead. Useful for a movie's "
+                              "consistent field of view, or to crop in on a specific region")
     parser.add_argument("--data-file", type=str, default=None,
                          help="CSV or FITS table of observed (phase, flux or magnitude, error) "
                               "data to overlay on the light curve/magnitude plot")
@@ -798,7 +993,10 @@ def main():
                               "processes (default 1, i.e. serial). Only worth it once the "
                               "phase loop itself takes more than about a second -- a "
                               "low-resolution/few-phase preview can finish before a process "
-                              "pool even starts up, making this a net loss there")
+                              "pool even starts up, making this a net loss there. Also used "
+                              "by --mcmc_fit, which instead spreads each step's walkers across "
+                              "this many threads (not processes, since the fit's own residuals "
+                              "function can't be pickled)")
     parser.add_argument("--dist", type=float, default=10.0,
                          help="observer distance in parsecs used to scale the light curve "
                               "from a relative flux to a real spectral flux density [mJy] "
@@ -846,26 +1044,30 @@ def main():
                               "i.e. 1%%) -- just needs to seed a small, non-degenerate cloud "
                               "for the sampler to diffuse outward from during burn-in, not "
                               "already span the true posterior width")
-    args = parser.parse_args()
+    # --bounds' value routinely starts with '-' (a negative xleft/ybottom,
+    # e.g. -1.2,1.5,-0.8,0.8) -- splice it to --bounds=value first so
+    # argparse doesn't misidentify it as an attempted option (see
+    # _splice_equals).
+    args = parser.parse_args(_splice_equals(sys.argv[1:], "--bounds"))
 
-    # --r_acc may be a comma-separated list of connection radii -- one
-    # accretion spot per entry, all sharing angle_acc/T_acc/u_acc (see
-    # its own --help, params._parse_r_acc). A CLI --r_acc is already that
-    # list (or None); a --config file's own r_acc default is NOT (it went
+    # --angle_acc may be a comma-separated list of connection angles -- one
+    # accretion spot per entry, all sharing spot_acc/T_acc/u_acc (see
+    # its own --help, params._parse_angle_acc). A CLI --angle_acc is already that
+    # list (or None); a --config file's own angle_acc default is NOT (it went
     # through load_yaml's ordinary single-float cast), so recover it
     # there too when the CLI didn't override it -- same "CLI beats config"
     # precedence params_from_args itself uses for every other field.
-    # Either way, normalize args.r_acc to a plain float (the first entry)
+    # Either way, normalize args.angle_acc to a plain float (the first entry)
     # before params_from_args or anything else touches it, so
-    # ModelParams.r_acc (--lsq_fit, the FITS header round-trip) only ever
-    # sees a single value, same as any other field. r_acc_list itself
+    # ModelParams.angle_acc (--lsq_fit, the FITS header round-trip) only ever
+    # sees a single value, same as any other field. angle_acc_list itself
     # (every entry, including that first one) is what actually drives the
     # accretion-spot physics and outline drawing below.
-    r_acc_list = args.r_acc
-    if r_acc_list is None and args.config:
-        r_acc_list = raw_r_acc_from_config(args.config)
-    if r_acc_list is not None:
-        args.r_acc = float(r_acc_list[0])
+    angle_acc_list = args.angle_acc
+    if angle_acc_list is None and args.config:
+        angle_acc_list = raw_angle_acc_from_config(args.config)
+    if angle_acc_list is not None:
+        args.angle_acc = float(angle_acc_list[0])
 
     outputs = {s.strip() for s in args.outputs.split(",") if s.strip()}
     unknown = outputs - set(OUTPUT_CHOICES)
@@ -881,10 +1083,12 @@ def main():
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MaxNLocator
 
-    from plots import plot_component_outlines, plot_topdown_shadows, style_axes
+    from plots import (plot_component_outlines, plot_topdown_shadows, style_axes, labeled_title,
+                        tighten_external_legend, fit_content_to_canvas)
     from render import (build_temperature_maps, render_system_image, physical_light_curve,
                          radial_velocity_curve, split_area_count, disc_aspect_ratio,
-                         PRIMARY_ASPECT, save_temperature_maps, load_temperature_maps)
+                         PRIMARY_ASPECT, save_temperature_maps, load_temperature_maps,
+                         G, MSUN, RSUN)
 
     if args.load_irradiation:
         lobe, disc, temp_maps, system, model, irradiate = load_temperature_maps(args.load_irradiation)
@@ -895,13 +1099,17 @@ def main():
         # change how much the primary/disc irradiate the secondary (see
         # irradiation.star_irradiation_flux/disc_irradiation_flux), which
         # is baked into the cached Tsec, just like R_in or any other
-        # geometry field. Only wavelength, u_2, and the
-        # separately-handled --phase* flags (not SystemParams/ModelParams
-        # fields at all) can safely differ without invalidating the cache
-        # -- any other differing
+        # geometry field. ph_off is likewise always safe -- it never
+        # reaches build_system/build_temperature_maps at all, only
+        # shifting the observed-data overlay at comparison time (see the
+        # "lightcurve"/"magnitude"/"rv" blocks below), same as why it's
+        # in _CHEAP_SYSTEM_FIT_FIELDS for --lsq_fit/--mcmc_fit. So
+        # wavelength, u_2, ph_off, and the separately-handled --phase*
+        # flags (not SystemParams/ModelParams fields at all) can safely
+        # differ without invalidating the cache -- any other differing
         # CLI override is dropped, with a warning.
         system, model = params_from_args(args, base=(system, model), strict=True,
-                                          exempt=("wavelength", "u_2"))
+                                          exempt=("wavelength", "u_2", "ph_off"))
         if disc.is_empty:
             n_disc = (1, 1)
         else:
@@ -912,9 +1120,7 @@ def main():
         irradiate = not args.no_irradiate
         temp_maps = None
 
-    prefix = args.prefix
-    if prefix is None and args.config:
-        prefix = os.path.splitext(os.path.basename(args.config))[0]
+    prefix, title_label = _prefix_and_title_label(args)
 
     if not args.show:
         os.makedirs(args.outdir, exist_ok=True)
@@ -931,7 +1137,30 @@ def main():
               np.linspace(args.phase_min, args.phase_max, args.phase_num))
 
     def finish(fig, kind, phase=None):
+        # title_label (SYSTEM tab's global label, --prefix) is merged into
+        # each output's own title at its own plotting call site (see
+        # plots.labeled_title, and this module's render_and_save/
+        # plot_flux_mag_view/"rv" block below) -- a single "LABEL : ..."
+        # line rather than a separate figure-level one, except the MCMC
+        # corner plot (_run_mcmc_fit), which has no single per-axis title
+        # to merge into and uses fig.suptitle directly instead.
         fig.tight_layout()
+        if kind in ("outline", "shadow"):
+            # outline/shadow's legend sits below the axes via
+            # ax.legend(bbox_to_anchor=(x, negative axes-fraction), ...)
+            # (see plots.py) -- an axes-fraction offset that ax.set_aspect
+            # ("equal") can badly distort once the axes' own fractional
+            # height gets shrunk on a wide canvas (e.g. the default
+            # 1280x720 --image-size), leaving a huge gap below the plot.
+            # Re-anchor it a small, fixed distance (in real inches) below
+            # the axes' actual rendered extent instead, now that layout is
+            # otherwise final.
+            tighten_external_legend(fig, fig.axes[0])
+        # last: nothing (title, legend, axis labels) should overflow the
+        # fixed --image-size canvas -- see fit_content_to_canvas's own
+        # docstring for why tight_layout's own margins can't be trusted
+        # to already guarantee that.
+        fit_content_to_canvas(fig)
         if args.show:
             # leave the figure open, undrawn -- the single plt.show() call
             # at the end of main() displays every requested output at once,
@@ -940,6 +1169,15 @@ def main():
             # during a long "temperature"/"lightcurve" wait instead.
             return
         path = _output_path(args.outdir, prefix, OUTPUT_KIND[kind], phase)
+        # NOT bbox_inches="tight": that crops the canvas to each frame's
+        # own content extent, which varies phase to phase (e.g. outline's
+        # autoscale, or how wide the legend ends up) -- fine for a single
+        # image, but it means a --phase-num>1 sequence comes out as
+        # differently-sized PNGs instead of the fixed --image-size every
+        # frame needs to share for a movie or any other automated/batch
+        # use. tighten_external_legend above already keeps outline/
+        # shadow's legend from drifting off the bottom of the fixed
+        # canvas, which was bbox_inches="tight"'s only real job here.
         fig.savefig(path, dpi=IMAGE_DPI)
         plt.close(fig)
         print("wrote", path)
@@ -976,6 +1214,21 @@ def main():
                               # divide by zero on a None R_in/R_out anyway
         lobe, disc, disc_teff_func = build_system(system, model)
 
+    # sanity-check printout: convert this run's internal-unit parameters
+    # (P_orb/a/q, plus R_1/R_2 as fractions of a -- see roche.py's module
+    # docstring for the a=1, G(M1+M2)=1 convention) to the equivalent
+    # physical masses/radii/separation, via Kepler's third law for
+    # M1+M2. lobe.r_volume_equiv is the secondary's actual
+    # volume-equivalent radius (fraction of a) whether it came from an
+    # explicit system.R_2 or from R_2's default lobe-filling behavior.
+    from blackbody import AU_M
+    M_total = 4.0 * np.pi ** 2 * system.a ** 3 / (G * system.P_orb_s ** 2)
+    M_1 = M_total / (1.0 + system.q)
+    M_2 = system.q * M_1
+    print(f"system check: M_1={M_1 / MSUN:.6g} Msun, R_1={system.R_1 * system.a / RSUN:.6g} Rsun, "
+          f"M_2={M_2 / MSUN:.6g} Msun, R_2={lobe.r_volume_equiv * system.a / RSUN:.6g} Rsun, "
+          f"a={system.a / AU_M:.6g} AU")
+
     # disc.is_empty reflects model.has_disc (see build_system): the disc
     # and hot spot are used only when their inputs were actually given.
     # The accretion stream is a separate, independent knob -- tied to
@@ -1001,20 +1254,32 @@ def main():
     # --load-irradiation already supplied temp_maps. Built before the
     # outline block below (rather than after, its more natural position)
     # so the outline can draw temp_maps.accretion_field_line (the
-    # accretion-spot connection, see PRIMARY tab's r_acc) if active.
+    # accretion-spot connection, see PRIMARY tab's angle_acc) if active.
     if temp_maps is None and ("temperature" in outputs or "intensity" in outputs
                                or "outline" in outputs
                                or "lightcurve" in outputs or "magnitude" in outputs or "rv" in outputs
                                or args.save_irradiation or args.lsq_fit or args.mcmc_fit):
+        # outline (like shadow, which doesn't even reach this point -- see
+        # above) never actually reads the secondary's temperature VALUES:
+        # it only uses len(temp_maps.Tsec) (a point count, identical
+        # either way) and temp_maps.accretion_field_lines (irradiate-
+        # independent geometry). So when outline is the only reason
+        # temp_maps is being built at all -- no temperature/intensity/
+        # lightcurve/magnitude/rv output, no --save-irradiation/--lsq_fit/
+        # --mcmc_fit to actually want the real physics -- there's nothing
+        # to lose by skipping the (expensive) irradiation calculation
+        # regardless of --no-irradiate, only time.
+        needs_real_temps = bool({"temperature", "intensity", "lightcurve", "magnitude", "rv"}
+                                 & outputs) or args.save_irradiation or args.lsq_fit or args.mcmc_fit
         temp_maps = build_temperature_maps(
             lobe, disc, system.T_1, system.T_2, system.R_1, disc_teff_func=disc_teff_func,
-            irradiate=irradiate, beta_grav=model.beta_grav,
+            irradiate=irradiate and needs_real_temps, beta_grav=model.beta_grav,
             hotspot_T_h=model.T_h if model.has_hotspot else None, hotspot_L_h_deg=model.L_h,
             n_sec=args.n_areas_2, n_disc=n_disc, u_disc=model.u_d,
             u_primary=system.u_1, n_primary=n_primary,
             theta_1=system.theta_1_rad, phi_1=system.phi_1_rad,
-            r_acc=(r_acc_list if r_acc_list is not None else model.r_acc),
-            angle_acc=model.angle_acc_rad, T_acc=model.T_acc, u_acc=model.u_acc,
+            angle_acc=(angle_acc_list if angle_acc_list is not None else model.angle_acc),
+            spot_acc=model.spot_acc_rad, T_acc=model.T_acc, u_acc=model.u_acc,
             incl_deg=system.incl, stream_angle_deg=args.stream_angle)
 
     if args.lsq_fit and args.mcmc_fit:
@@ -1024,30 +1289,85 @@ def main():
         (system, model, args.dist, args.data_norm, args.data_rv_gamma,
          lobe, disc, temp_maps) = _run_lsq_fit(
             args, system, model, lobe, disc, disc_teff_func, temp_maps,
-            n_primary, n_disc, irradiate, lobe._ntheta, lobe._nphi, r_acc_list)
+            n_primary, n_disc, irradiate, lobe._ntheta, lobe._nphi, angle_acc_list)
 
     if args.mcmc_fit:
         (system, model, args.dist, args.data_norm, args.data_rv_gamma,
          lobe, disc, temp_maps) = _run_mcmc_fit(
             args, system, model, lobe, disc, disc_teff_func, temp_maps,
-            n_primary, n_disc, irradiate, lobe._ntheta, lobe._nphi, r_acc_list, finish)
+            n_primary, n_disc, irradiate, lobe._ntheta, lobe._nphi, angle_acc_list, finish)
 
     if "outline" in outputs:
         if lobe.fill_factor < 1.0:
             xs, ys = np.zeros(0), np.zeros(0)
         else:
-            traj = integrate_stream(lobe, stream_angle_deg=args.stream_angle)
-            idx = closest_approach_index(traj, lobe.x1)
+            # extend the integration limit (if needed) to guarantee the
+            # trajectory actually sweeps far enough to reach every active
+            # --angle_acc entry -- same reasoning as
+            # render.build_temperature_maps'/accretion_connection_line's own
+            # matching extension (which governs the *red* field-line curves
+            # drawn from temp_maps.accretion_field_lines below); this one
+            # governs the *green* ballistic-stream curve drawn from this
+            # block's own, separately-integrated traj.
+            eff_stream_angle = args.stream_angle
+            if angle_acc_list is not None:
+                max_angle_acc = float(np.max(angle_acc_list))
+                eff_stream_angle = max(args.stream_angle, max_angle_acc) \
+                    if args.stream_angle is not None else max_angle_acc
+            traj = integrate_stream(lobe, stream_angle_deg=eff_stream_angle)
+            if args.stream_angle is not None:
+                # an explicit --stream_angle is the user's own authoritative
+                # instruction for how far to show the stream -- e.g. to
+                # visualize overflow past where it would otherwise hit the
+                # disc (see STREAM tab's own note) -- so display the WHOLE
+                # computed trajectory (up to wherever integration actually
+                # stopped: exactly stream_angle, or earlier if the particle
+                # plunged into the primary first) rather than second-guessing
+                # it with the closest-approach heuristic below, which exists
+                # only to pick a sensible endpoint when stream_angle wasn't
+                # given at all.
+                idx = len(traj["x"]) - 1
+            else:
+                idx = closest_approach_index(traj, lobe.x1)
+                if idx is None:
+                    # no turnaround found within the trajectory (e.g. t_max
+                    # cut it off too early -- see closest_approach_index's
+                    # own docstring) -- fall back to the trajectory's own
+                    # last point, same as every other closest_approach_index
+                    # call site in this package.
+                    idx = len(traj["x"]) - 1
+            if angle_acc_list is not None:
+                # don't let the plotted stream curve stop short of the
+                # furthest active accretion-connection point -- otherwise
+                # the red field-line curves (drawn separately, from the
+                # already-extended temp_maps.accretion_field_lines) branch
+                # off from a point the green stream curve never visibly
+                # reaches, an inexplicable-looking gap. Only ever extends
+                # idx (never shortens it below the closest-approach/
+                # fallback choice above).
+                for ang in angle_acc_list:
+                    ang_idx = angle_acc_index(traj, float(ang))
+                    if ang_idx is not None:
+                        idx = max(idx, ang_idx)
             s_vals = np.linspace(0.0, traj["s"][idx], 200)
             xs, ys = sample_points(traj, s_vals)
         # if a cache was loaded, show the sample count it actually has
         # (n_areas_2 is meaningless there -- the secondary wasn't
         # rebuilt from it) rather than the CLI's (possibly stale) default.
         n_sec_points = len(temp_maps.Tsec) if temp_maps is not None else args.n_areas_2
-        # one line per active --r_acc entry (see ModelParams.r_acc, built
-        # above from the *full* r_acc_list, not just its first value) --
+        # one line per active --angle_acc entry (see ModelParams.angle_acc, built
+        # above from the *full* angle_acc_list, not just its first value) --
         # every one of them now really does heat its own spot.
         accretion_field_lines = temp_maps.accretion_field_lines if temp_maps is not None else []
+        # the disc's own stream-impact hot spot (T_h/L_h, DISC tab -- not
+        # the magnetic accretion_spot above): phase-independent, so
+        # computed once here, same as accretion_field_lines/n_sec_points.
+        # impact_azimuth returns None if the stream never actually reaches
+        # this disc's rim (e.g. r_in too large), same "nothing to show"
+        # case build_temperature_maps itself already handles for T_h.
+        hotspot_phi_h = impact_azimuth(lobe, disc) if model.has_hotspot else None
+        hotspot_dphi_max_deg = (_hotspot_dphi_max(disc, model, hotspot_phi_h)
+                                 if hotspot_phi_h is not None else None)
         for phase in phases:
             fig, ax = plt.subplots(figsize=figsize)
             plot_component_outlines(lobe, disc, {"x": xs, "y": ys}, system.R_1,
@@ -1056,7 +1376,20 @@ def main():
                                      n_sec=n_sec_points, n_disc=n_disc, n_primary=n_primary_outline,
                                      theta_1=system.theta_1_rad, phi_1=system.phi_1_rad,
                                      n_field_1=args.n_field_1,
-                                     accretion_field_lines=accretion_field_lines)
+                                     accretion_field_lines=accretion_field_lines,
+                                     hotspot_phi_h=hotspot_phi_h, hotspot_L_h_deg=model.L_h,
+                                     hotspot_dphi_max_deg=hotspot_dphi_max_deg,
+                                     label=title_label)
+            if args.bounds is not None:
+                # override the default per-phase autoscale (fit to
+                # whatever's currently visible/drawn) with a fixed field
+                # of view -- ax.set_aspect("equal") above already keeps
+                # x/y scaling equal, so this box also fixes the plotted
+                # region's shape, same as every frame of a movie sharing
+                # one field of view
+                xleft, xright, ybottom, ytop = args.bounds
+                ax.set_xlim(xleft, xright)
+                ax.set_ylim(ybottom, ytop)
             finish(fig, "outline", phase)
 
     if args.save_irradiation:
@@ -1081,7 +1414,7 @@ def main():
                 lobe, disc, system.T_1, system.R_1, phase, system.incl, temp_maps,
                 quantity=quantity, pixel_mapping=args.pixelmapping,
                 u_primary=system.u_1, u_secondary=system.u_2, u_disc=model.u_d, T_acc=model.T_acc,
-                u_acc=model.u_acc)
+                u_acc=model.u_acc, extent=args.bounds)
             fig, ax = plt.subplots(figsize=figsize)
             ax.set_facecolor("black")  # unrendered (NaN) sky pixels show through as black, not white
             im = ax.imshow(img, origin="lower", extent=(xedges[0], xedges[-1], yedges[0], yedges[-1]),
@@ -1089,7 +1422,7 @@ def main():
             fig.colorbar(im, ax=ax, label=label, extend=extend)
             ax.set_xlabel("X / a")
             ax.set_ylabel("Y / a")
-            ax.set_title(f"phase={phase:.2f}")
+            ax.set_title(labeled_title(title_label, f"phase={phase:.2f}"))
             style_axes(ax)
             finish(fig, kind, phase)
 
@@ -1222,6 +1555,7 @@ def main():
                 ax.invert_yaxis()  # brighter (lower mag) on top, standard convention
             ax.set_xlabel("orbital phase")
             ax.set_ylabel(ylabel)
+            ax.set_title(labeled_title(title_label))
             ax.legend(fontsize=9)
             style_axes(ax, right=False)
             if primary == "flux":
@@ -1280,9 +1614,10 @@ def main():
         plot_topdown_shadows(lobe, disc, system.R_1, phases, system.incl, ax=ax,
                               theta_1=system.theta_1_rad, phi_1=system.phi_1_rad,
                               n_field_1=args.n_field_1,
-                              r_acc=(r_acc_list if r_acc_list is not None else model.r_acc),
+                              angle_acc=(angle_acc_list if angle_acc_list is not None else model.angle_acc),
                               T_eff1=system.T_1, T_acc=model.T_acc,
-                              stream_angle_deg=args.stream_angle)
+                              stream_angle_deg=args.stream_angle,
+                              label=title_label)
         finish(fig, "shadow")
 
     if "rv" in outputs:
@@ -1338,8 +1673,17 @@ def main():
                         capsize=1.5, label=f"{col} ({curve_name})")
 
         ax.axhline(0.0, color="gray", lw=0.5, alpha=0.5)
+        if gamma != 0.0:
+            # the systemic velocity itself -- distinct from the plain 0.0
+            # reference line above, and from the gamma-shifted curves
+            # (which already include it): this just marks where that
+            # shift landed, e.g. to sanity-check a --data_rv_gamma fit
+            # against the data's own apparent offset from zero.
+            ax.axhline(gamma, color="black", lw=0.8, ls="--", alpha=0.6,
+                       label=f"rv_gamma={gamma:.3g} km/s")
         ax.set_xlabel("orbital phase")
         ax.set_ylabel("radial velocity [km/s]")
+        ax.set_title(labeled_title(title_label))
         ax.legend(fontsize=9)
         style_axes(ax)
         finish(fig, "rv")

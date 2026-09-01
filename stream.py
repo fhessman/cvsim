@@ -32,28 +32,24 @@ def lubow_shu_angle(lobe):
 
 
 def _eom(t, state, mu1, mu2, x1, x2):
-    x, y, vx, vy = state
+    """
+    State is (x, y, vx, vy, theta): the orbital-plane ballistic equations
+    of motion, plus a 5th state, the primary-centered azimuth (radians)
+    swept since t=0, integrated directly (d(theta)/dt = (dx*vy - dy*vx)/r1^2,
+    the standard angular-velocity-about-a-point formula) rather than
+    recovered from arctan2(y, x-x1) after the fact, so it accumulates
+    past +-pi instead of wrapping. Tracked unconditionally (its cost is
+    one extra scalar derivative) so every trajectory integrate_stream
+    returns carries angle_deg, whether or not stream_angle_deg is used to
+    stop early on it -- see integrate_stream/angle_acc_index.
+    """
+    x, y, vx, vy = state[0], state[1], state[2], state[3]
     r1 = np.hypot(x - x1, y)
     r2 = np.hypot(x - x2, y)
     ax = 2.0 * vy + x - mu1 * (x - x1) / r1 ** 3 - mu2 * (x - x2) / r2 ** 3
     ay = -2.0 * vx + y - mu1 * y / r1 ** 3 - mu2 * y / r2 ** 3
-    return [vx, vy, ax, ay]
-
-
-def _eom_with_angle(t, state, mu1, mu2, x1, x2):
-    """
-    _eom plus a 5th state, the primary-centered azimuth (radians) swept
-    since t=0, integrated directly (d(theta)/dt = (dx*vy - dy*vx)/r1^2,
-    the standard angular-velocity-about-a-point formula) rather than
-    recovered from arctan2(y, x-x1) after the fact, so it accumulates
-    past +-pi instead of wrapping -- see integrate_stream's
-    stream_angle_deg.
-    """
-    x, y, vx, vy = state[0], state[1], state[2], state[3]
-    dxdt, dydt, ax, ay = _eom(t, state[:4], mu1, mu2, x1, x2)
-    r1_sq = (x - x1) ** 2 + y ** 2
-    dtheta = ((x - x1) * vy - y * vx) / r1_sq
-    return [dxdt, dydt, ax, ay, dtheta]
+    dtheta = ((x - x1) * vy - y * vx) / r1 ** 2
+    return [vx, vy, ax, ay, dtheta]
 
 
 def integrate_stream(lobe, eps=0.02, t_max=8.0, r_min_primary=0.02, max_step=0.01,
@@ -84,32 +80,39 @@ def integrate_stream(lobe, eps=0.02, t_max=8.0, r_min_primary=0.02, max_step=0.0
     deep/eccentric the periapsis passage is, which isn't known in
     advance).
 
-    Prints the trajectory's closest approach to the primary and its
-    final radius, every time this runs -- e.g. to help pick a sensible
-    --r_acc (the field-line connection radius) by seeing where the
-    ballistic trajectory itself actually reaches.
+    The trajectory's cumulative swept azimuth (angle_deg, see the
+    returned dict below) is tracked unconditionally regardless of
+    stream_angle_deg -- stream_angle_deg only controls whether/where
+    integration stops early because of it, not whether the angle itself
+    is computed. angle_acc_index looks up a connection point along it the
+    same way this function's own stream_angle_deg does.
+
+    Prints the trajectory's closest approach to the primary (and the
+    swept angle there) and its final radius/angle, every time this runs
+    -- e.g. to help pick a sensible --angle_acc (the field-line
+    connection angle) by seeing where the ballistic trajectory itself
+    actually reaches.
 
     Returns dict with arrays t, x, y, vx, vy, s (arclength from L1),
-    plus the scalar A, theta, x_L1 used to start the integration.
+    angle_deg (cumulative signed swept azimuth [deg] from L1, 0=facing
+    the secondary, positive/negative by direction of travel -- see
+    angle_acc_index), plus the scalar A, theta, x_L1 used to start the
+    integration.
     """
     mu1, mu2, x1, x2 = lobe.mu1, lobe.mu2, lobe.x1, lobe.x2
     A, theta = lubow_shu_angle(lobe)
     vx0 = -eps * np.cos(theta)
     vy0 = eps * np.sin(theta)
+    state0 = [lobe.x_L1, 0.0, vx0, vy0, 0.0]
 
     def hit_primary(t, state, *_args):
         return np.hypot(state[0] - x1, state[1]) - r_min_primary
     hit_primary.terminal = True
     hit_primary.direction = -1
 
-    if stream_angle_deg is None:
-        state0 = [lobe.x_L1, 0.0, vx0, vy0]
-        eom = _eom
-        events = [hit_primary]
-        t_span_max = t_max
-    else:
-        state0 = [lobe.x_L1, 0.0, vx0, vy0, 0.0]
-        eom = _eom_with_angle
+    events = [hit_primary]
+    t_span_max = t_max
+    if stream_angle_deg is not None:
         target_theta = np.radians(stream_angle_deg)
 
         def hit_angle(t, state, *_args):
@@ -117,37 +120,47 @@ def integrate_stream(lobe, eps=0.02, t_max=8.0, r_min_primary=0.02, max_step=0.0
         hit_angle.terminal = True
         hit_angle.direction = 1
 
-        events = [hit_primary, hit_angle]
+        events.append(hit_angle)
         t_span_max = max(t_max, t_max * max(1.0, stream_angle_deg / 180.0) * 4.0)
 
-    sol = solve_ivp(eom, [0.0, t_span_max], state0, args=(mu1, mu2, x1, x2),
+    sol = solve_ivp(_eom, [0.0, t_span_max], state0, args=(mu1, mu2, x1, x2),
                      method="DOP853", max_step=max_step,
                      rtol=1e-10, atol=1e-12, dense_output=True,
                      events=events)
 
-    x, y, vx, vy = sol.y[0], sol.y[1], sol.y[2], sol.y[3]
+    x, y, vx, vy, theta_swept = sol.y[0], sol.y[1], sol.y[2], sol.y[3], sol.y[4]
     ds = np.hypot(np.diff(x), np.diff(y))
     s = np.concatenate([[0.0], np.cumsum(ds)])
+    angle_deg = np.degrees(theta_swept)
 
     r1_all = np.hypot(x - x1, y)
-    print(f"stream: closest approach to primary r={r1_all.min():.6g}, "
-          f"final r={r1_all[-1]:.6g} (units of a)")
+    i_min = int(np.argmin(r1_all))
+    print(f"stream: closest approach to primary r={r1_all[i_min]:.6g} (units of a) "
+          f"at angle={angle_deg[i_min]:.6g} deg, "
+          f"final r={r1_all[-1]:.6g} (units of a) at angle={angle_deg[-1]:.6g} deg")
 
     return {
-        "t": sol.t, "x": x, "y": y, "vx": vx, "vy": vy, "s": s,
+        "t": sol.t, "x": x, "y": y, "vx": vx, "vy": vy, "s": s, "angle_deg": angle_deg,
         "A": A, "theta": theta, "x_L1": lobe.x_L1,
         "hit_primary": len(sol.t_events[0]) > 0,
     }
 
 
-def disc_impact_index(traj, rim_radius_func, x1):
+def disc_impact_index(traj, rim_radius_func, x1, report=False):
     """
     Index of the first point along the trajectory that lies inside a disc
     of primary-centered rim radius R(azimuth) = rim_radius_func(nu), with
     nu measured from the +x direction (line towards the secondary).
 
     rim_radius_func(nu) -> R  [array-safe: nu in radians, returns radius]
-    Returns None if the trajectory never enters the disc.
+    Returns None if the trajectory never enters the disc (in particular,
+    always None for disc.Disc.is_empty's "null disc" placeholder, since
+    its rim sits beyond where the stream ever reaches).
+
+    report: if True and an impact IS found, print the impact radius and
+    azimuth [deg, units of a] -- the disc-impact analogue of
+    integrate_stream's own closest-approach print, for callers where a
+    real disc is expected to matter (e.g. render.build_temperature_maps).
     """
     xs = traj["x"] - x1
     ys = traj["y"]
@@ -157,7 +170,11 @@ def disc_impact_index(traj, rim_radius_func, x1):
     idx = np.argmax(inside)  # first True, or 0 if none
     if not inside[idx]:
         return None
-    return int(idx)
+    idx = int(idx)
+    if report:
+        print(f"stream: hits disc at r={r[idx]:.6g} (units of a), "
+              f"azimuth={np.degrees(nu[idx]):.6g} deg")
+    return idx
 
 
 def impact_azimuth(lobe, disc, eps=0.02):
@@ -200,22 +217,36 @@ def closest_approach_index(traj, x1):
     return int(turn[0] + 1)
 
 
-def r_acc_index(traj, x1, r_acc):
+def angle_acc_index(traj, angle_acc_deg):
     """
-    Index of the first point along the (infalling) trajectory where the
-    distance from the primary (x1) drops to r_acc or less -- the "magnetic
-    field takes over" connection point for a magnetic CV's accretion spot
-    (see magnetic.field_line_to_point), the disc-less analogue of
-    disc_impact_index.
+    Index of the first point along the trajectory where the cumulative
+    swept azimuth (traj["angle_deg"], see integrate_stream) reaches
+    angle_acc_deg in magnitude -- the "magnetic field takes over"
+    connection point for a magnetic CV's accretion spot (see
+    magnetic.field_line_to_point), matching integrate_stream's own
+    stream_angle_deg convention (0=facing the secondary, 180=directly
+    behind the primary, may exceed 360). The disc-less analogue of
+    disc_impact_index, and the angle-based replacement for the old
+    radius-based r_acc_index.
 
-    Returns None if the trajectory never gets that close, i.e. r_acc is
-    smaller than the stream's minimum approach to the primary (see
-    closest_approach_index) -- the caller should report this and skip the
-    accretion-spot feature rather than silently taking the trajectory's
-    last point.
+    Returns None if the trajectory never actually sweeps that far --
+    e.g. angle_acc_deg exceeds however far stream_angle_deg let
+    integrate_stream run, or the particle plunged into the primary
+    (traj["hit_primary"]) before reaching it -- the caller should report
+    this and skip the accretion-spot feature rather than silently taking
+    the trajectory's last point.
+
+    A small absolute tolerance (1e-6 deg, far below any physically
+    meaningful angle_acc granularity) absorbs solve_ivp's own event
+    root-finding precision: when integrate_stream was itself given
+    stream_angle_deg == angle_acc_deg (the trajectory was extended
+    exactly to reach this connection point, see accretion_connection_line/
+    build_temperature_maps' auto-extension), the event-terminated
+    trajectory's own final angle can land a few ULPs short of the exact
+    target (e.g. 94.99999999999996 instead of 95.0) -- without this, an
+    exact-strict ">=" would spuriously find no crossing at all.
     """
-    r1 = np.hypot(traj["x"] - x1, traj["y"])
-    inside = r1 <= r_acc
+    inside = np.abs(traj["angle_deg"]) >= angle_acc_deg - 1e-6
     idx = np.argmax(inside)
     if not inside[idx]:
         return None

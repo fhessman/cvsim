@@ -14,6 +14,132 @@ from stream import closest_approach_index, integrate_stream, disc_impact_index, 
 from lightcurve import star_points
 
 
+def tighten_external_legend(fig, ax, margin_in=0.12):
+    """
+    Re-anchor `ax`'s legend (created via ax.legend(bbox_to_anchor=(x, negative
+    axes-fraction), ...) -- see plot_component_outlines/plot_topdown_shadows'
+    own below-the-axes legends) a small, FIXED distance (in real figure
+    inches, not axes-fraction) below the axes' actual rendered extent
+    (tick labels/xlabel included). Call once, after the figure's own
+    final layout pass (simulate.py's finish(), right before savefig) --
+    ax.set_aspect("equal") can shrink the axes' own fractional height a
+    lot on a wide canvas (e.g. simulate.py's default 1280x720
+    --image-size), and a bbox_to_anchor offset expressed in axes-fraction
+    (tuned for a squarer figure) then translates to a much larger -- or,
+    for a more squashed axes, potentially too small/clipped -- absolute
+    gap than intended. No-op if `ax` has no legend.
+    """
+    leg = ax.get_legend()
+    if leg is None:
+        return
+    # get_tightbbox() includes the legend itself (a child artist of ax) at
+    # wherever it's currently anchored -- which, before this call, is
+    # exactly the badly-offset position this function exists to fix, so
+    # measuring with it still attached would just reproduce the same gap.
+    # Hide it for the measurement, then restore it at the freshly computed
+    # position.
+    leg.set_visible(False)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    tight = ax.get_tightbbox(renderer)
+    inv = fig.transFigure.inverted()
+    (x0, y0), (x1, _y1) = inv.transform([(tight.x0, tight.y0), (tight.x1, tight.y1)])
+    margin = margin_in / fig.get_size_inches()[1]
+    leg.set_visible(True)
+    leg.set_bbox_to_anchor(((x0 + x1) / 2.0, y0 - margin), transform=fig.transFigure)
+
+
+def fit_content_to_canvas(fig, pad_frac=0.008):
+    """
+    Nudge the figure's subplot margins so nothing -- title, legend, axis
+    labels -- overflows the canvas edge, without changing the canvas's
+    own pixel size (simulate.py's finish() deliberately does NOT use
+    savefig(bbox_inches="tight"): every frame of a --phase-num>1 sequence
+    needs to share the same --image-size dimensions for a movie or any
+    other automated/batch use, not each get cropped to its own content).
+
+    fig.tight_layout()'s own margins are picked before matplotlib
+    finalizes anything whose actual rendered size/position depends on
+    the draw itself -- ax.set_aspect("equal") shrinking/repositioning the
+    axes box (see tighten_external_legend's own docstring for the same
+    issue on the legend side), or a title long enough to wrap -- so with
+    a fixed canvas the title or legend can end up genuinely clipped
+    against the top/bottom edge instead of just oddly spaced, at
+    whichever phases/content happen to push the real layout past what
+    tight_layout guessed. Call once everything else (including
+    tighten_external_legend, if used) is already in its final position.
+
+    Measures the whole figure's actual rendered tight bbox and, on
+    whichever side(s) it overflows the canvas, shrinks the axes box by
+    exactly that much (plus a small pad) -- a no-op if nothing overflows.
+    """
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    # Figure.get_tightbbox (unlike Axes.get_tightbbox, used elsewhere in
+    # this module) returns its Bbox in figure INCHES, not display pixels.
+    tight = fig.get_tightbbox(renderer)
+    fig_w, fig_h = fig.get_size_inches()
+    sp = fig.subplotpars
+    top, bottom, left, right = sp.top, sp.bottom, sp.left, sp.right
+    over_top = tight.y1 - fig_h
+    if over_top > 0.0:
+        top -= over_top / fig_h + pad_frac
+    over_bottom = -tight.y0
+    if over_bottom > 0.0:
+        bottom += over_bottom / fig_h + pad_frac
+    over_right = tight.x1 - fig_w
+    if over_right > 0.0:
+        right -= over_right / fig_w + pad_frac
+    over_left = -tight.x0
+    if over_left > 0.0:
+        left += over_left / fig_w + pad_frac
+    if (top, bottom, left, right) != (sp.top, sp.bottom, sp.left, sp.right):
+        fig.subplots_adjust(top=top, bottom=bottom, left=left, right=right)
+
+
+def _ensure_ccw(X, Y):
+    """
+    Reverse a closed 2D loop (X,Y) if its signed area is negative
+    (clockwise), so the returned loop is always counterclockwise.
+
+    Needed before filling an annulus as one path via "outer forward +
+    inner reversed" (matplotlib leaves the enclosed hole unfilled only
+    when the two loops wind in OPPOSITE senses) -- reliable only if both
+    loops start from a known, consistent orientation. That's not a given
+    here: the outer loop can be either a plain parametric sweep
+    (disc_outline's flat-disc rim, angle increasing -- whose screen-space
+    winding after projection depends on phase/inclination) or a
+    scipy.spatial.ConvexHull silhouette (the flared-disc case), which
+    scipy always returns counterclockwise in whatever 2D coordinates it's
+    given, regardless of the original points' order -- so the two loops'
+    relative winding can flip from one phase/case to another if left
+    alone. Forcing both to this same canonical (CCW) orientation first,
+    then always reversing just the inner one, makes the hole subtraction
+    correct unconditionally.
+    """
+    area = np.sum(X[:-1] * Y[1:] - X[1:] * Y[:-1])
+    if area < 0.0:
+        return X[::-1], Y[::-1]
+    return X, Y
+
+
+def labeled_title(label, title=""):
+    """
+    Prefix a plot's own title with simulate.py's --prefix global label
+    (see its own --help), single-line ("LABEL : title") -- shared by every
+    plotting function (here and in simulate.py) that sets its own
+    ax.set_title, so the two always combine the same way. `title` may be
+    omitted for a plot with no title of its own beyond the label itself
+    (e.g. simulate.py's lightcurve/magnitude/rv outputs); label may
+    likewise be empty/None (--prefix not given) -- either combination
+    degrades gracefully to whichever of the two is actually non-empty, or
+    "" (a harmless no-op title) if neither is.
+    """
+    if label and title:
+        return f"{label} : {title}"
+    return label or title
+
+
 def style_axes(ax, right=True):
     """
     Standard tick styling applied to every axes this package plots on:
@@ -166,6 +292,68 @@ def disc_outline(disc, phase, incl, lobe=None, n=200, primary_center=None, R1=No
     return X[idx], Y[idx], np.ones(len(idx), dtype=bool)
 
 
+def disc_hotspot_wedges(disc, phi_h, L_h_deg, dphi_max_deg, phase, incl, n_steps=24, n_pts=15,
+                         flat_band_frac=0.08):
+    """
+    A sequence of thin, progressively fainter wedge-shaped patches sitting
+    entirely on the disc's own outer edge, downstream of the stream-impact
+    azimuth phi_h [rad] -- an illustrative (not photometrically accurate
+    -- see below) stand-in for the render.disc_surfaces_with_teff hot
+    spot, for the outline output. Returns a list of (X, Y, alpha) tuples,
+    one per step, each ready for ax.fill(X, Y, alpha=alpha).
+
+    Each step spans an angular slice [dphi0, dphi1) of downstream azimuth
+    (same prograde/increasing-phi sense as disc_surfaces_with_teff's own
+    dphi = mod(phi-phi_h, 2*pi)), covering 0 to dphi_max_deg in n_steps
+    equal slices. The patch never spreads radially inward onto the disc
+    face -- it stays fixed at r=rim(nu), the true outer edge -- but for a
+    flared disc (opening_angle>0) does span that edge's own full vertical
+    wall height, z=-h(nu) to +h(nu) with h=rim(nu)*tan(opening_angle),
+    the exact geometry disc_cross_section_lines already draws as the
+    rim's upper/lower lip curves (so the fill lines up with them, "as
+    tall as the outer disc" rather than sitting only at its midplane).
+    For a flat disc (opening_angle==0, no wall height to use) a thin
+    radial sliver instead, (1-flat_band_frac)*rim(nu) to rim(nu) at z=0.
+    Only alpha (not the patch's own extent) follows the real
+    T_h*exp(-dphi/L_h) falloff, evaluated at each slice's own midpoint
+    dphi. This is a deliberately rough visual cue for where the bright
+    spot sits and how fast it fades, not a real surface-brightness map --
+    "a set of different fillings that get weaker and weaker", not a
+    smooth/quantitatively correct gradient.
+
+    dphi_max_deg: total downstream extent to cover -- normally
+    simulate.py's own hot-spot-vs-disc-temperature crossing point (see
+    its _hotspot_dphi_max), so the wedge sequence stops exactly where the
+    real max(T_base, T_h*exp(-dphi/L_h)) formula drops to T_base (no
+    boost left at all) instead of an arbitrary fixed angular cutoff --
+    giving a physically meaningful sense of how far the bright spot
+    actually extends.
+    """
+    L_h = np.radians(L_h_deg)
+    edges = np.linspace(0.0, np.radians(dphi_max_deg), n_steps + 1)
+    wedges = []
+    for i in range(n_steps):
+        dphi0, dphi1 = edges[i], edges[i + 1]
+        nu = np.linspace(phi_h + dphi0, phi_h + dphi1, n_pts)
+        r = disc.rim(nu)
+        x, y = disc.x1 + r * np.cos(nu), r * np.sin(nu)
+        if disc.opening_angle > 0.0:
+            h = r * np.tan(disc.opening_angle)
+            pts = np.stack([np.concatenate([x, x[::-1]]),
+                             np.concatenate([y, y[::-1]]),
+                             np.concatenate([h, -h[::-1]])], axis=-1)
+        else:
+            r_in = r * (1.0 - flat_band_frac)
+            x_in, y_in = disc.x1 + r_in * np.cos(nu), r_in * np.sin(nu)
+            pts = np.stack([np.concatenate([x, x_in[::-1]]),
+                             np.concatenate([y, y_in[::-1]]),
+                             np.zeros(2 * n_pts)], axis=-1)
+        X, Y, _ = project(pts, phase, incl)
+        alpha = float(np.exp(-0.5 * (dphi0 + dphi1) / L_h))
+        wedges.append((X, Y, alpha))
+    return wedges
+
+
 def _occluded_by_sphere(pts, center, radius, n_hat):
     """
     True where a point sits behind a sphere (`center`, `radius`) along the
@@ -217,12 +405,21 @@ def disc_cross_section_lines(disc, phase, incl, lobe=None, n_nu=200,
     points hidden behind the disc's own solid, the Roche lobe, or the
     primary star (whichever of `lobe`/`primary_center`+`R1` are given)
     for _hidden_split_plot.
+
+    The inner-up/inner-lo pair is omitted (only the outer two are
+    returned) when R1 is given and disc.r_in <= R1 -- same reasoning as
+    disc_inner_rim_line's own matching guard: the inner edge wall sits at
+    or inside the primary's own surface, so there's no disc material
+    there to mark a distinct boundary for.
     """
     if disc.opening_angle <= 0.0:
         return []
     nu = np.linspace(0.0, 2.0 * np.pi, n_nu)
     lines = []
-    for R, outward_sign in ((disc.rim(nu), 1.0), (np.full(n_nu, disc.r_in), -1.0)):
+    edges = [(disc.rim(nu), 1.0)]
+    if R1 is None or disc.r_in > R1:
+        edges.append((np.full(n_nu, disc.r_in), -1.0))
+    for R, outward_sign in edges:
         h = R * np.tan(disc.opening_angle)
         x = disc.x1 + R * np.cos(nu)
         y = R * np.sin(nu)
@@ -245,7 +442,17 @@ def disc_inner_rim_line(disc, phase, incl, lobe=None, n=150,
     rim. Present regardless of opening_angle (a flat disc's inner edge is
     just this circle; a flared disc additionally gets the inner edge's
     up/down lips from disc_cross_section_lines). Returns (X,Y,visible).
+
+    Returns empty arrays when R1 is given and disc.r_in <= R1 -- the
+    inner rim sits at or inside the primary's own surface, so there's no
+    disc material between the star and its own equator to mark a distinct
+    boundary for; drawing this circle anyway would just retrace the
+    star's own equator (a real 3D circle on its surface, but not its
+    projected silhouette except exactly edge-on), an artifact with no
+    physical meaning of its own.
     """
+    if R1 is not None and disc.r_in <= R1:
+        return np.zeros(0), np.zeros(0), np.zeros(0, dtype=bool)
     ang = np.linspace(0.0, 2.0 * np.pi, n)
     x = disc.x1 + disc.r_in * np.cos(ang)
     y = disc.r_in * np.sin(ang)
@@ -395,7 +602,7 @@ def stream_outline(traj, x1, phase, incl, disc=None, lobe=None, primary_center=N
     wherever the ballistic trajectory stops being physically meaningful
     (its first pericenter passage around the primary/"closest approach",
     see stream.closest_approach_index, or -- for a magnetic CV -- the
-    accretion-spot connection point, see stream.r_acc_index; simulate.py's
+    accretion-spot connection point, see stream.angle_acc_index; simulate.py's
     "outline" output does this once, up front). Re-deriving that
     truncation here from an already-truncated, resampled curve is not
     just redundant: interpolation can make r1(s) wobble non-monotonically
@@ -575,7 +782,9 @@ def _plot_sample_points(ax, lobe, disc, R1, phase, incl, n_sec, n_disc, n_primar
 def plot_component_outlines(lobe, disc, traj, R1, phase, incl_deg, ax=None,
                              fill=True, show_points=False,
                              n_sec=20000, n_disc=(80, 160), n_primary=(60, 120),
-                             theta_1=0.0, phi_1=0.0, n_field_1=0, accretion_field_lines=()):
+                             theta_1=0.0, phi_1=0.0, n_field_1=0, accretion_field_lines=(),
+                             hotspot_phi_h=None, hotspot_L_h_deg=None, hotspot_dphi_max_deg=None,
+                             label=None):
     """
     Draw the projected outlines of the secondary (Roche lobe), primary
     (only its disc-visible limb arc(s), radius R1), disc rim, and stream
@@ -602,12 +811,24 @@ def plot_component_outlines(lobe, disc, traj, R1, phase, incl_deg, ax=None,
     accretion_field_lines: (n,3) curves from the primary's surface to an
     accretion stream connection point (see
     render.TemperatureMaps.accretion_field_line/render.accretion_connection_line,
-    build_temperature_maps'/--r_acc's own docstrings) -- one per --r_acc
+    build_temperature_maps'/--angle_acc's own docstrings) -- one per --angle_acc
     entry when it's a list, e.g. via simulate.py -- each drawn as a solid
     red line, occlusion-tested the same way as the dipole loops above;
     empty (the default) draws nothing. Only the first actually heats a
     spot on the primary or affects the light curve -- the rest are
     geometry only, same as the dipole loops.
+
+    hotspot_phi_h/hotspot_L_h_deg/hotspot_dphi_max_deg: the disc's own
+    stream-impact hot spot (model.T_h/model.L_h, DISC tab -- not the
+    magnetic accretion_spot above), shown as a sequence of green,
+    progressively fainter wedge patches sitting on the disc's own outer
+    edge (never spread radially inward onto its face), downstream of the
+    impact azimuth hotspot_phi_h [rad] (stream.impact_azimuth's own
+    convention) out to hotspot_dphi_max_deg -- see disc_hotspot_wedges.
+    Any of the three left None/non-positive (the default) disables it.
+
+    label: simulate.py's --prefix global label (see labeled_title), if
+    any -- prepended to this plot's own "q=..., i=..., phase=..." title.
     """
     import matplotlib.pyplot as plt
 
@@ -641,6 +862,19 @@ def plot_component_outlines(lobe, disc, traj, R1, phase, incl_deg, ax=None,
                                                    primary_center=primary_center, R1=R1):
         _hidden_split_plot(ax, Xe, Ye, vis_e, "#e08214", lw=style["lw"])
     _hidden_split_plot(ax, Xst, Yst, vis_st, "#1b9e77", lw=style["lw"], label="accretion stream")
+    # faint full limb circle, always drawn underneath (even when the
+    # primary is entirely hidden, e.g. eclipsed behind the secondary or
+    # the disc) -- the same "always-present faint guide" every other
+    # body's outline gets from _hidden_split_plot's own unconditional
+    # first pass (disc/stream/field lines above); primary_visibility_grid
+    # can't reuse that helper directly (it needs a 2D contour, not a 1D
+    # curve, to correctly trace a possibly-complex partial-occlusion
+    # shape -- e.g. the disc cutting a chord across the primary's face,
+    # not just its outer limb), so this circle is drawn separately, at
+    # the identical (lw*0.5, alpha*0.3) faint styling, with the solid
+    # contour below drawn on top of it for whatever's actually visible.
+    _, Xp_full, Yp_full = circle_outline(primary_center, R1, phase, incl, n=100)
+    ax.plot(Xp_full, Yp_full, color=primary_color, lw=style["lw"] * 0.5, alpha=0.3)
     vis_f = vis_g.astype(float)
     if vis_f.any():
         ax.contour(Xg, Yg, vis_f, levels=[0.5], colors=[primary_color], linewidths=style["lw"])
@@ -673,7 +907,7 @@ def plot_component_outlines(lobe, disc, traj, R1, phase, incl_deg, ax=None,
         ax.plot(Xp[vis_pole], Yp[vis_pole], "o", color="blue", ms=2.5, label="magnetic poles")
 
     # accretion-spot connection(s) (stream -> field line -> primary
-    # surface, see render.build_temperature_maps'/--r_acc's own
+    # surface, see render.build_temperature_maps'/--angle_acc's own
     # docstrings): solid red, same occlusion tests as the field lines
     # above; one legend entry for the whole family, same as those.
     n_hat_acc, _, _ = observer_frame(phase, incl)
@@ -738,19 +972,44 @@ def plot_component_outlines(lobe, disc, traj, R1, phase, incl_deg, ax=None,
             ax.fill(Xs, Ys, color=secondary_color, alpha=0.15)
 
         def fill_disc_and_primary():
-            if disc.opening_angle <= 0.0:
-                # flat disc: Xd/Yd (outer rim) and Xdi/Ydi (inner rim) are
-                # both simple, consistently-oriented closed loops -- fill
-                # outer + reversed inner as one path so the hole is left
-                # unfilled instead of painted over (same trick as
-                # plot_topdown_shadows' disc annulus).
-                ax.fill(np.concatenate([Xd, Xdi[::-1]]), np.concatenate([Yd, Ydi[::-1]]),
+            # Xd/Yd (outer rim -- disc_outline's flat-disc parametric
+            # sweep, or its flared-disc convex-hull silhouette) and
+            # Xdi/Ydi (inner rim -- disc_inner_rim_line's own midplane
+            # circle, computed above regardless of opening_angle) filled
+            # as one "outer forward + inner reversed" path so the hole
+            # between them is left unfilled instead of painted over (same
+            # trick as plot_topdown_shadows' disc annulus) -- _ensure_ccw
+            # first, since the two loops' relative winding otherwise isn't
+            # guaranteed consistent (see its own docstring), which would
+            # silently double-fill the hole instead of leaving it empty.
+            # Xdi is empty when disc.r_in <= R1 (see disc_inner_rim_line):
+            # there's no distinct hole then, the primary's own fill
+            # (below) already covers that region, so just fill Xd/Yd whole.
+            Xd_ccw, Yd_ccw = _ensure_ccw(Xd, Yd)
+            if len(Xdi) > 0:
+                Xdi_ccw, Ydi_ccw = _ensure_ccw(Xdi, Ydi)
+                ax.fill(np.concatenate([Xd_ccw, Xdi_ccw[::-1]]),
+                        np.concatenate([Yd_ccw, Ydi_ccw[::-1]]),
                         color="#e08214", alpha=0.12)
             else:
-                # flared disc: Xd/Yd is a convex-hull silhouette of the
-                # whole 3D solid, which has no hole to begin with (a convex
-                # shape can't be an annulus), so there's nothing to subtract.
-                ax.fill(Xd, Yd, color="#e08214", alpha=0.12)
+                ax.fill(Xd_ccw, Yd_ccw, color="#e08214", alpha=0.12)
+            # disc's own stream-impact hot spot (see this function's
+            # docstring, disc_hotspot_wedges): drawn here, with the rest
+            # of the disc's fill, so it shares the same back-to-front
+            # ordering against the secondary below -- not occlusion-tested
+            # against the disc/primary's own geometry any further than
+            # that, same simplification as the disc annulus fill above.
+            if (hotspot_phi_h is not None and hotspot_L_h_deg is not None
+                    and hotspot_dphi_max_deg is not None and hotspot_dphi_max_deg > 0.0):
+                for i, (Xh, Yh, alpha) in enumerate(
+                        disc_hotspot_wedges(disc, hotspot_phi_h, hotspot_L_h_deg,
+                                             hotspot_dphi_max_deg, phase, incl)):
+                    # facecolor/edgecolor (not the color= shorthand, which
+                    # sets both) -- otherwise each wedge's own edge stroke
+                    # shows as a visible seam against its neighbors,
+                    # instead of the sequence reading as one smooth fade.
+                    ax.fill(Xh, Yh, facecolor="green", edgecolor="none", alpha=alpha,
+                            label="hot spot" if i == 0 else None)
             # primary's own fill is already occlusion-masked (vis_g
             # accounts for both disc and secondary), so its position
             # relative to the disc specifically doesn't matter -- only
@@ -778,7 +1037,7 @@ def plot_component_outlines(lobe, disc, traj, R1, phase, incl_deg, ax=None,
     ax.set_aspect("equal")
     ax.set_xlabel("X / a  (sky-plane)")
     ax.set_ylabel("Y / a  (sky-plane)")
-    ax.set_title(f"q={lobe.q:.2f}, i={incl_deg:.1f} deg, phase={phase:.3f}")
+    ax.set_title(labeled_title(label, f"q={lobe.q:.2f}, i={incl_deg:.1f} deg, phase={phase:.3f}"))
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.45), ncol=4,
               fontsize=9, framealpha=0.9)
     style_axes(ax)
@@ -855,7 +1114,8 @@ def secondary_shadow_on_midplane(lobe, phase, incl):
 
 def plot_topdown_shadows(lobe, disc, R1, phases, incl_deg, ax=None,
                           theta_1=0.0, phi_1=0.0, n_field_1=0,
-                          r_acc=None, T_eff1=None, T_acc=None, stream_angle_deg=None):
+                          angle_acc=None, T_eff1=None, T_acc=None, stream_angle_deg=None,
+                          label=None):
     """
     Pole-on (face-on, "effective inclination 0") diagram of the system,
     oriented at this "apparent phase zero" so the secondary sits below
@@ -901,8 +1161,8 @@ def plot_topdown_shadows(lobe, disc, R1, phases, incl_deg, ax=None,
     outline output, whenever n_field_1>0, with no occlusion test (see
     above).
 
-    r_acc/T_eff1/T_acc: the accretion spot's connection radius/radii (see
-    params._parse_r_acc) and the temperatures accretion_connection_line
+    angle_acc/T_eff1/T_acc: the accretion spot's connection angle(s) (see
+    params._parse_angle_acc) and the temperatures accretion_connection_line
     needs to decide whether each one is actually active -- draws one
     solid red field line per active entry, same as plot_component_outlines'
     "accretion spot" curves. All three must be given (not None) for this
@@ -910,9 +1170,13 @@ def plot_topdown_shadows(lobe, disc, R1, phases, incl_deg, ax=None,
 
     stream_angle_deg: forwarded to integrate_stream (see its docstring)
     for both the accretion-stream curve and the accretion-spot connection
-    line(s) above, so a trajectory that needs to sweep past its default
-    closest-approach stopping point (e.g. to reach a --r_acc beyond that)
+    line(s) above -- extended (if needed) to cover angle_acc's own
+    largest entry, so a trajectory that needs to sweep past its default
+    closest-approach stopping point (e.g. to reach a --angle_acc beyond that)
     is available here too.
+
+    label: simulate.py's --prefix global label (see labeled_title), if
+    any -- prepended to this plot's own "q=..., i=... -- face-on, ..." title.
     """
     import matplotlib.pyplot as plt
     from render import accretion_connection_line
@@ -962,13 +1226,48 @@ def plot_topdown_shadows(lobe, disc, R1, phases, incl_deg, ax=None,
 
     # accretion stream: L1 to the disc impact point (or closest approach,
     # if it never reaches the disc), same convention as elsewhere, drawn
-    # via stream_outline (see plot_component_outlines) once truncated
-    traj = integrate_stream(lobe, stream_angle_deg=stream_angle_deg)
-    idx = disc_impact_index(traj, disc.rim, lobe.x1)
-    if idx is None:
-        idx = closest_approach_index(traj, lobe.x1)
-    if idx is None:
+    # via stream_outline (see plot_component_outlines) once truncated.
+    # Extend the integration limit (if needed) to guarantee the
+    # trajectory sweeps far enough to reach every requested
+    # accretion-connection angle -- same reasoning as
+    # render.build_temperature_maps' own matching extension, needed here
+    # too since this traj is passed pre-built into accretion_connection_line
+    # below, bypassing its own fallback extension.
+    eff_stream_angle = stream_angle_deg
+    if angle_acc is not None:
+        max_angle_acc = float(np.max(np.atleast_1d(angle_acc)))
+        eff_stream_angle = max(stream_angle_deg, max_angle_acc) \
+            if stream_angle_deg is not None else max_angle_acc
+    traj = integrate_stream(lobe, stream_angle_deg=eff_stream_angle)
+    # always reported (see disc_impact_index's own report= option), even
+    # when its result isn't used for truncation below
+    disc_idx = disc_impact_index(traj, disc.rim, lobe.x1, report=True)
+    if stream_angle_deg is not None:
+        # an explicit stream_angle_deg (see simulate.py's --stream_angle) is
+        # the user's own authoritative instruction for how far to show the
+        # stream -- e.g. to visualize overflow past where it would
+        # otherwise hit the disc -- so display the WHOLE computed
+        # trajectory rather than second-guessing it with the disc-impact/
+        # closest-approach heuristics below, which exist only to pick a
+        # sensible endpoint when stream_angle_deg wasn't given at all.
         idx = len(traj["x"]) - 1
+    else:
+        idx = disc_idx
+        if idx is None:
+            idx = closest_approach_index(traj, lobe.x1)
+        if idx is None:
+            idx = len(traj["x"]) - 1
+    if angle_acc is not None:
+        # don't let the plotted stream curve stop short of the furthest
+        # active accretion-connection point -- see simulate.py's matching
+        # "outline" output extension for why (avoids the red field-line
+        # curves below branching off from a point the green stream curve
+        # never visibly reaches).
+        from stream import angle_acc_index
+        for ang in np.atleast_1d(angle_acc):
+            ang_idx = angle_acc_index(traj, float(ang))
+            if ang_idx is not None:
+                idx = max(idx, ang_idx)
     s_vals = np.linspace(0.0, traj["s"][idx], 300)
     xst, yst = sample_points(traj, s_vals)
     Xst, Yst, _ = stream_outline({"x": xst, "y": yst}, lobe.x1, PHASE0, INCL0)
@@ -987,10 +1286,10 @@ def plot_topdown_shadows(lobe, disc, R1, phases, incl_deg, ax=None,
         ax.plot(Xpole, Ypole, "o", color="blue", ms=2.5, label="magnetic poles")
 
     # accretion-spot connection(s) -- one solid red line per active
-    # --r_acc entry, same render.accretion_connection_line every other
+    # --angle_acc entry, same render.accretion_connection_line every other
     # "where does this field line go" question in this package uses
-    if r_acc is not None and T_eff1 is not None and T_acc is not None:
-        _, spot_lines = accretion_connection_line(lobe, R1, theta_1, phi_1, r_acc, T_eff1, T_acc,
+    if angle_acc is not None and T_eff1 is not None and T_acc is not None:
+        _, spot_lines = accretion_connection_line(lobe, R1, theta_1, phi_1, angle_acc, T_eff1, T_acc,
                                                     traj=traj, stream_angle_deg=stream_angle_deg)
         for i, line in enumerate(spot_lines):
             Xa, Ya, _ = project(line, PHASE0, INCL0)
@@ -1020,8 +1319,8 @@ def plot_topdown_shadows(lobe, disc, R1, phases, incl_deg, ax=None,
     ax.set_aspect("equal")
     ax.set_xlabel("Y / a  (face-on)")
     ax.set_ylabel("-X / a  (face-on)")
-    ax.set_title(f"q={lobe.q:.2f}, i={incl_deg:.1f} deg -- face-on, "
-                 f"secondary shadow vs. phase")
+    ax.set_title(labeled_title(label, f"q={lobe.q:.2f}, i={incl_deg:.1f} deg -- face-on, "
+                                       f"secondary shadow vs. phase"))
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=3,
               fontsize=9, framealpha=0.9)
     style_axes(ax)

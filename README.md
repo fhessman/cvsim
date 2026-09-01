@@ -4,9 +4,9 @@ A Roche-lobe binary-star eclipse simulator for cataclysmic variables (CVs),
 including magnetic CVs ("polars"). 
 
 This collection of python scripts was written with the help of Claude Code
-to be a tool for various tasks associated with observations of CVs, including
+to be a tool for various tasks associated with the interpretation of observations of CVs, including
 the graphical representation of the geometries, the calculation of realistic
-lightcurves and radial velocity curves including the realistic effects on
+lightcurves and radial velocity curves including the effects of
 eclipses, fitting lightcurve or rv data, and even creating primitive
 "photographic" images of the systems.
 
@@ -34,35 +34,41 @@ the config/CLI boundary and get converted internally.
   star -- `R_2=0` (the default) always means exactly lobe-filling, the
   defining condition for a mass-transferring CV.
 - **Accretion stream** (`stream.py`) -- a ballistic stream leaving
-  the L1 nozzle, following Lubow & Shu (1975). The initial velocity is set by
+  the L1 nozzle is calculated following Lubow & Shu (1975). The initial velocity is set by
   the local sound speed, then integrated under gravity + Coriolis +
   centrifugal forces in the corotating frame. By default, the trajectory
   is drawn/used up to its first closest approach to the primary (a stand-in
   for "where the disc/field would take over"); `--stream_angle` can extend
   it further (even multiple loops around the primary) when the stream should
   be stopped at the disc rim or at particular magnetic field line, e.g. when a magnetic
-  connection point lies beyond that first approach.
+  connection point lies beyond that first approach.  Note that the stream is not stopped
+  by a disc by default, but the corresponding angle can be chosen to do so (so that
+  overflow can be simulated).
 - **Accretion disc** (`disc.py`, optional) -- considered only if `R_in`,
   `R_out`, `T_0`, and `beta_d` are *all* given. The rim is a Kepler
   ellipse focused on the primary (semi-major axis, eccentricity,
   periapsis angle), and surface temperature follows a radial power law
   `T(R) = T_0*(R/R_in)^beta_d`. A disc can optionally be given nonzero
   thickness defined by non-zero constant opening angle `beta_d`.
-  If the `T_acc`? and `L_acc`?
+  If the `T_h` and `L_h`
   parameters are given, then a "hot spot" on the disc's outer rim starting
   at the accretion stream's impact point is created, where the 
-  disc rim's temperature is exponentially decreasing with an angular scale ?.
+  disc rim's temperature then exponentially decreases with an angular scale `L_h`
+  until it reaches the disc's normal temperature. Note that - using this recipe -
+  no hotspot emission is visible when i=0!
 - **Magnetic channeling / "polar" accretion** (`magnetic.py`) -- used for
   simulating a system where the
   primary's magnetic field disrupts disc formation (AM Her being
   the prototype). The modelled field is a simple tilted dipole (obliquity `theta_1`,
   azimuth `phi_1`, ususally fixed in the corotating frame under the standard
-  synchronous-rotation assumption). If an "accretion connection radius"
-  (`r_acc`) is set, the ballistic stream is assumed to hand off to the
-  field there, and the connecting field line carries material onward to a
-  heated spot on the primary's surface -- this spot has its own
-  temperature, angular size, and (independent) limb-darkening/brightening
-  law, and irradiates the secondary like any other hot component.
+  synchronous-rotation assumption). If an "accretion connection angle"
+  (`angle_acc` -- how far around the primary, cumulative swept azimuth
+  from L1, matching `stream_angle`'s own convention) is set, the ballistic
+  stream is assumed to hand off to the field there, and the connecting
+  field line carries material onward to a heated spot on the primary's
+  surface -- this spot has its own angular size (`spot_acc`), temperature,
+  and (independent) limb-darkening/brightening law, and irradiates the
+  secondary like any other hot component.
 - **Irradiation** (`irradiation.py`) -- full view-factor integrals (not a
   point-source approximation) for how much the disc/primary heat the
   secondary's surface, including partial occultation of the primary by
@@ -97,7 +103,10 @@ one figure regardless.
 
 ## 3. How the YAML config files work
 
-Each config (`examples/*.yaml`, once published) is consumed two ways:
+Each config -- `examples/AMHer.yaml`/`examples/ZCha.yaml` (real systems, with
+their own observed data under `examples/data/`) plus `simulate.yaml` (a
+blank, field-by-field template for setting up a new system) -- is consumed
+two ways:
 
 - **`gui.py`** (a generic PySide6 form-builder that can be used for 
   running any python script) reads the *entire* file: a
@@ -113,7 +122,7 @@ Each config (`examples/*.yaml`, once published) is consumed two ways:
   `SystemParams`/`ModelParams` dataclass fields (see `params.py`):
   `P_orb, a, q, R_1, T_1, T_2, incl, wavelength, u_1, u_2, R_2, ph_off,
   theta_1, phi_1` (SystemParams) and `R_in, R_out, T_0, beta_d, T_h, L_h,
-  beta_grav, e_d, omega_d, alpha_d, u_d, r_acc, angle_acc, T_acc, u_acc`
+  beta_grav, e_d, omega_d, alpha_d, u_d, angle_acc, spot_acc, T_acc, u_acc`
   (ModelParams).
 
 **The gotcha:** every *other* field in a config -- `--outputs`,
@@ -131,84 +140,174 @@ own `--<field_name>` flag on the plain CLI, config or not.)
 ## 4. Parameters by pane
 
 ### SYSTEM
-The binary's physically "given" parameters: `P_orb` [d], `a` [m] (orbital
-separation), `q` (mass ratio M2/M1), `incl` [deg], `dist` [pc] (scales the
-light curve to a real flux density), `wavelength` [Angstrom].
+The binary's physically "given" parameters:
+- the simulation label/file prefix `prefix`;
+- the orbital period `P_orb` [d];
+- the orbital separation `a` [m];
+- the mass-ratio `q` (M2/M1);
+- the orbital inclination`incl` [deg];
+- the distance `dist` [pc] (scales the light curve to a real flux density);
+- the observed `wavelength` [Angstrom].
 
 ### PHASES
-Shared by every phase-dependent output: `phase-min`/`phase-max` (a single
-phase if `phase-num=1`, else the sweep range), `phase-num`.
+Shared by every phase-dependent output:
+- the number of phases used `phase-num`;
+- minimum & maximum phases `phase-min` and `phase-max` (a single phase is
+  used if `phase-num`=1, else the sweep range).
 
 ### PRIMARY
-`R_1` [units of a], `T_1` [K], `u_1` (limb-darkening coefficient -- also
-governs how strongly the primary irradiates the secondary, so it's baked
-into a saved irradiation cache), `n_areas_1` (surface-sampling
-resolution). Magnetic/accretion-spot knobs: `theta_1`/`phi_1` [deg]
-(dipole obliquity/azimuth), `n_field_1` (cosmetic field-line-loop count
-for the outline output), `r_acc` [units of a] (accretion connection
-radius/radii -- comma-separated for more than one; the feature-enabling
-field), `angle_acc` [deg] (spot angular radius), `T_acc` [K] (spot
-temperature -- ignored with a warning if not hotter than `T_1`), `u_acc`
-(spot's own, independent limb-darkening/brightening coefficient).
+Properties of the primary object:
+- radius `R_1` [units of a];
+- temperature`T_1` [K];
+- limb-darkening coefficient `u_1` (governs how strongly the
+  primary irradiates the secondary, so it's saved in an irradiation cache);
+- number of surface areas `n_areas_1`;
+- dipole obliquity and azimuth `theta_1` and `phi_1` [deg];
+- number of cosmetic field-line loops `n_field_1`;
+- `angle_acc` [deg] is a comma-separated list of accretion connection angle(s) -- define the
+  around the primary, cumulative swept azimuth from L1
+  places were the stream is tapped by the dipole field;
+- `spot_acc` is the angular radius size of the resulting accretion spots on the surface of
+  the primary; actually reached, to help pick a value;
+- the accretion spot temperature `T_acc` [K] (should be > T_1);
+- the accretion spot's limb-darkening/limb-brightening coefficient `u_acc`.
 
 ### SECONDARY
-`R_2` [units of a] (0 = exactly Roche-lobe-filling; larger values are
-clipped to lobe-filling), `T_2` [K], `u_2`, `beta_grav` (gravity-darkening
-exponent, Lucy 1967), `n_areas_2` (surface-sampling resolution).
+Properties of the secondary object:
+- radius `R_2` [units of a] (0 = exactly Roche-lobe-filling; larger values are clipped to lobe-filling);
+- temperature `T_2` [K];
+- limb-darkening coefficient `u_2`;
+- gravity-darkening exponent `beta_grav` (Lucy 1967);
+- number of surface areas `n_areas_2`;
 
 ### DISC
-`R_in`/`R_out` [units of a], `T_0` [K], `beta_d` (temperature power-law
-index) -- the disc is built only if all four are given. Optional shape
-extras: `alpha_d` [deg] (half-opening angle, 0 = flat), `e_d`
-(eccentricity), `omega_d` [deg] (periastron orientation), `u_d`
-(limb-darkening), `n_areas_d` (surface-sampling resolution).
+Properties of the circum-primary disc (the disc is considered only if these properties are all given):
+- inner radius`R_in`[units of a];
+- outer radius `R_out` [units of a];
+- temperature at R_in `T_0` [K];
+- temperature power-law coefficient `beta_d` (temperature power-law index)
+- number of surface areas `n_areas_d`.
+
+Optional properties:
+- disc half-opening angle `alpha_d` [deg] (0 = flat);
+- outer disc eccentricity `e_d` (0 = circular);
+- douter disc "periastron" orientation`omega_d` [deg];
+- disc limb-darkening coefficient `u_d`.
 
 ### STREAM
-`T_h`/`L_h` -- the disc-rim stream-impact hot spot (needs a disc, plus
-both of these given). `stream_angle` [deg] -- how far around the primary
-the ballistic stream is integrated before stopping (blank = stop at first
-closest approach; set higher, up to and beyond 360, to reach an
-accretion-connection radius further along the trajectory). Every stream
-integration prints its closest approach and final radius to help pick
-that radius.
+Properties of the accretion stream:
+- hot spot impact temperature `T_h` [K];
+- hot spot angular scale `L_h` (The hot spot extends beyond the impact point
+  with a temperature that decreases as T = T_h exp(-(phi-phi_impact)/L_h);
+- the angular extent`stream_angle` [deg], measured from the secondary in the
+  direction of the stream (default is stopping at the outer disc or the radius
+  of closest approach, but stream_angle can be > 360 to let the stream go around multiple times);
 
 ### OUTPUT
-`outputs` (comma-separated choice list, see section 3), `show`,
-`show-points` (scatter each body's actual sample points, to judge
-resolution), `outdir`, `prefix` (defaults to the config's basename),
-`save-irradiation`/`load-irradiation` (FITS cache of the expensive
-irradiation calculation -- loading one only lets `wavelength`/`u_2` still
-safely vary; anything else that would change the cached irradiation is
-ignored with a warning).
+Parameters controlling the output:
+- `outputs` is a comma-separated list of options shown in Section 3;
+- `show` is a flag which indicates whether the output should be displayed or
+  saved in a file;
+- `show-points` is a flag used for displaying the surface points of all bodies (useful to 
+  determine an optimal resolution);
+- `outdir` is the optional output directory;
+- `save-irradiation`/`load-irradiation` read/writes a FITS cache of the expensive
+  irradiation calculation -- loading one only lets `wavelength`/`u_2` still
+  safely vary; anything else that would change the cached irradiation is
+  ignored with a warning).
 
 ### DATA
-Photometric overlay/fit: `data-file`, `data-phase-col`, exactly one of
-`data-flux-col`/`data-mag-col`, `data-err-col`. Radial-velocity
-overlay/fit (independent, any subset may be active): `data-rv-file`
-(defaults to `data-file` if blank), `data-rv-phase-col`, and four
-column/error-column pairs -- `data_rv_1` (primary), `data_rv_2`
-(secondary, the usual source of a CV's measured RV curve), `data_rv_stream`,
-`data_rv_hotspot` (the magnetically-channeled stream) -- each independently
-enabling that component's overlay and fit contribution. `data_rv_gamma`
-[km/s] -- a single systemic-velocity offset added to every model RV curve
-before comparing to any of the above (the model itself has zero systemic
-velocity).
+Parameters describing the use of external data files:
+- `ph_off` is the phase offset applied to the data (corrects a bad ephemeris in the data, not the model!);
+- `data-file` is the CSV/FITS file containing photometric data;
+- `data-phase-col` is the label of the phase column in data-file;
+- `data-flux-col` is the label of the flux column;
+- `data-mag-col` is the label of the magnitude column;
+- `data-err-col` is the label of the error column;
+- `data-rv-file` is the CSV/FITS file containing RV data (defaults to `data-file` if blank);
+- `data-rv-phase-col` is the label of the phase column in data-rv-file;
+- `data_rv_1` is the label of the primary RV column;
+- `data_rv_2` is the label of the secondary RV column;
+- `data_rv_stream` is the label of the stream RV column;
+- `data_rv_hotspot` is the label of a magnetially channeled stream RV column;
+- `data_rv_gamma` is the systemic-velocity offset [km/s] added to every model RV curve
+  before comparing to any of the above (the model itself has zero systemic velocity).
 
 ### FIT
-`ph_off` (phase offset subtracted from the data before
-overlay/fitting -- corrects a bad ephemeris in the data, not the model),
-`data_norm` (multiplicative flux factor or additive magnitude offset
-applied to the data before comparing). `lsq_fit`/`mcmc_fit`
-(comma-separated parameter names -- any `SystemParams`/`ModelParams`
-field, plus the pseudo-parameters `dist`, `data_norm`, `rv_gamma` -- fit
-by least squares or MCMC against whichever of `data-file`/any
-`data_rv_*_col` is active, jointly if more than one; mutually exclusive
-with each other). MCMC-only: `nburn`, `nsample`, `walkers` (per
-parameter), `spread` (starting-ball dispersion), `corner_plot`.
+Parameters controlling the fitting of simulations with observed data:
+- `data_norm` is a multiplicative flux factor or additive magnitude offset
+  applied to the data to adjust the levels to the simulation;
+- `lsq_fit` or `mcmc_fit` are lists of simulation parameters that should be fit, using either
+ a least-squares or MCMC optimisation, respectively;
+- `nburn` is the nummber of burn-in MCMC samples;
+- `nsample` is the number of finale MCMC samples;
+- `walkers` is the ratio of MCMC walkers per parameter;
+- `spread` is the starting dispersion used to initialize the MCMC sampling;
+- `corner_plot` is a flag to indicate that an MCMC corner plot is desired.
 
 ### MISC
-`no-irradiate` (cheaper gravity-darkening-only preview), `workers`
-(parallelize the light-curve phase loop), `pixelmapping` (`direct` vs.
-`indirect` sample-to-pixel rendering strategy), `image-size` (output PNG
-pixel dimensions), `vmin`/`vmax` (colorbar limits for the
-temperature/intensity renders).
+Various parameters affecting the simulation:
+- `no-irradiate` is a flag indicating if the irradiation of all surface areas should be
+  performed or not;
+- `workers` is the number of processes used to parallize the calculations (machine dependent!);
+- `pixelmapping` (`direct` vs.  `indirect` sample-to-pixel rendering strategy);
+- `image-size` is the output PNG pixel dimensions NxM;
+- `vmin` and `vmax` are the colorbar limits for the temperature/intensity rendering.
+
+## 5. Examples
+
+The three configs under `examples/` represent real systems, each set up to show
+off a different part of the model. The images below are each config's own
+default `outline` output -- every field left at its own recorded YAML
+default (the same values `gui.py` would show on load), saved to
+`examples/outputs/` -- no fitting, no observed-data overlay, just the
+geometry.
+
+### bare cvsim
+
+![bare cvsim outline](examples/outputs/bare_cvsim_plot_0.250000.png)
+
+This is a bare-bones CV simulation with a semi-detached secondary and
+a free-falling accretion stream.  Note that the lack of an accretion disc
+(and the large value of the angular extent of the stream in the config file)
+lets the stream orbit around the non-magnetic primary several times.
+
+### Z Cha
+
+![Z Cha outline](examples/outputs/Z_Cha_plot_-0.100000.png)
+
+A classic non-magnetic eclipsing dwarf nova with an accretion stream
+exiting the inner Lagrange point, an accretion disc, and a "hot spot" created
+by the impact of the stream on the disc
+(shown here symbolically as the green areas fading around the outer rim),
+all viewed close to the
+secondary eclipse (`phase=-0.1`) where the disc's near side is
+partially hidden behind the secondary.
+
+### AM Her
+
+![AM Her outline](examples/outputs/AMHer_plot_0.250000.png)
+
+The prototype magnetic CV ("polar"): the secondary overflows its Roche
+lobe, but there is **no disc** -- the primary's tilted dipole field
+(`theta_1`/`phi_1`, the dotted blue loops) instead channels the ballistic
+stream directly onto a hot spot on the primary's surface (the small red
+arc; `angle_acc`/`spot_acc`/`T_acc`). 
+
+The config file is bundled with a link to real AAVSO/Kafka et al (2005)
+V-band photometry (`./examples/data/`): to produce a lightcurve, simply
+- change the output to "magnitude" (lightcurve for data in magnitudes),
+- change the displayed phases from a single phase to multiple phases (e.g.
+101 points from phase -0.5 to 0.5), and run again.
+
+### EX Hya
+
+![EX Hya outline](examples/outputs/EX_Hya_plot_0.250000.png)
+
+An intermediate polar: unlike AM Her, EX Hya has a real accretion disc
+with its own stream-impact hot spot
+*and* a magnetic primary -- this config shows
+the disc/stream geometry together with the dipole field-line loops as a
+cosmetic overlay (no `angle_acc` is set here, so the stream isn't actually
+routed onto the field in this particular default view).
+

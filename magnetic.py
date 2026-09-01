@@ -179,9 +179,9 @@ def field_line_to_point(center, R1, theta_1, phi_1, target_point, n=100):
     Trace the single dipole field line connecting the primary's surface
     (radius R1) to `target_point` (corotating frame, any radius >= R1
     from `center`) -- the accretion-spot connection: an accretion stream
-    reaches magnetic radius r_acc at `target_point`, and is assumed to
+    reaches swept angle angle_acc at `target_point`, and is assumed to
     then follow this field line down onto the surface (see
-    stream.r_acc_index, render.build_temperature_maps' r_acc).
+    stream.angle_acc_index, render.build_temperature_maps' angle_acc).
 
     Unlike field_line_points (a full pole-to-pole loop), this traces only
     the shorter arc from target_point's own (nearer) surface footpoint out
@@ -230,30 +230,30 @@ def field_line_to_point(center, R1, theta_1, phi_1, target_point, n=100):
     return points, footpoint_dir
 
 
-def accretion_spot_mask(normals, footpoint_dir, angle_acc):
+def accretion_spot_mask(normals, footpoint_dir, spot_acc):
     """
     Boolean mask over primary-centered unit direction vectors `normals`
-    (...,3): True within angular radius angle_acc [rad] of footpoint_dir
+    (...,3): True within angular radius spot_acc [rad] of footpoint_dir
     (a unit vector) -- the accretion spot's footprint on the primary's
     surface (see field_line_to_point).
     """
     cos_angle = np.einsum("...i,i->...", normals, footpoint_dir)
-    return cos_angle >= np.cos(angle_acc)
+    return cos_angle >= np.cos(spot_acc)
 
 
-def primary_surface_temperature(normals, T_1, footpoint_dirs=None, angle_acc=0.0, T_acc=None):
+def primary_surface_temperature(normals, T_1, footpoint_dirs=None, spot_acc=0.0, T_acc=None):
     """
     Per-point primary surface temperature over primary-centered unit
     direction vectors `normals` (...,3): uniform T_1 everywhere, except
-    within angular radius angle_acc [rad] of any of footpoint_dirs (a
-    list of unit vectors, one per active accretion radius -- see
-    params._parse_r_acc) where it's T_acc -- the accretion spot(s) where
+    within angular radius spot_acc [rad] of any of footpoint_dirs (a
+    list of unit vectors, one per active accretion angle -- see
+    params._parse_angle_acc) where it's T_acc -- the accretion spot(s) where
     field-line-channeled material lands (see field_line_to_point). Every
-    spot shares the same angle_acc/T_acc (only the connection radius, and
+    spot shares the same spot_acc/T_acc (only the connection angle, and
     so the footpoint, differs between them). Returns uniform T_1 (no
     spot) if footpoint_dirs is None/empty or T_acc is None -- the
     caller's single gate for "no active accretion spot this run" (see
-    render.build_temperature_maps' r_acc/T_acc validity checks), so every
+    render.build_temperature_maps' angle_acc/T_acc validity checks), so every
     consumer (the primary's own observer-facing flux, and its irradiation
     of the secondary) sees the identical spot(s), or none.
     """
@@ -261,17 +261,17 @@ def primary_surface_temperature(normals, T_1, footpoint_dirs=None, angle_acc=0.0
     if footpoint_dirs and T_acc is not None:
         mask = np.zeros(T.shape, dtype=bool)
         for footpoint_dir in footpoint_dirs:
-            mask |= accretion_spot_mask(normals, footpoint_dir, angle_acc)
+            mask |= accretion_spot_mask(normals, footpoint_dir, spot_acc)
         T[mask] = float(T_acc)
     return T
 
 
-def primary_limb_coefficient(normals, u_1, footpoint_dirs=None, angle_acc=0.0, u_acc=0.0):
+def primary_limb_coefficient(normals, u_1, footpoint_dirs=None, spot_acc=0.0, u_acc=0.0):
     """
     Per-point primary limb-darkening coefficient (I=I0*(1-u+u*mu), see
     lightcurve.py's module docstring) over primary-centered unit direction
     vectors `normals` (...,3): uniform u_1 everywhere, except within
-    angular radius angle_acc [rad] of any of footpoint_dirs (a list of
+    angular radius spot_acc [rad] of any of footpoint_dirs (a list of
     unit vectors, see field_line_to_point) where it's u_acc -- every
     accretion spot's own limb law, independent of the rest of the
     primary's.
@@ -284,13 +284,13 @@ def primary_limb_coefficient(normals, u_1, footpoint_dirs=None, angle_acc=0.0, u
     Unlike primary_surface_temperature's T_acc, u_acc has no None-gated
     "off" state of its own (0.0, like u_1/u_2/u_d elsewhere, already means
     "flat/no limb law") -- footpoint_dirs is the sole gate for "no active
-    accretion spot," matching angle_acc's own always-real-valued
+    accretion spot," matching spot_acc's own always-real-valued
     convention. Returns uniform u_1 if footpoint_dirs is None/empty.
     """
     u = np.full(np.asarray(normals).shape[:-1], float(u_1))
     if footpoint_dirs:
         mask = np.zeros(u.shape, dtype=bool)
         for footpoint_dir in footpoint_dirs:
-            mask |= accretion_spot_mask(normals, footpoint_dir, angle_acc)
+            mask |= accretion_spot_mask(normals, footpoint_dir, spot_acc)
         u[mask] = float(u_acc)
     return u
