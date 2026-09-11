@@ -381,12 +381,14 @@ accreting magnetic field lines occur at the end of the stream).
 
 ### EX Hya
 
-![EX Hya outline](examples/outputs/EX_Hya_plot_0.250000.png)
+![EX Hya outline](examples/outputs/EX_Hya_plot_0.650000.png)
 
 An intermediate polar: unlike AM Her, EX Hya has a real accretion disc
 with its own stream-impact hot spot
 *and* a magnetic primary -- this config shows
 the disc/stream geometry together with the dipole field-line loops as a
-cosmetic overlay (no `angle_acc` is set here, so the stream isn't actually
-routed onto the field in this particular default view).
+cosmetic overlay.  With the stream ending at the inner disc radius and appropriate values
+of `angle_acc` set, it looks like the stream is actually
+feeding from the disc, rather than the stream.
+
 
