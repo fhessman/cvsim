@@ -268,7 +268,7 @@ class Disc:
         normals[..., 2] *= -1.0
         return xs, ys, zs, normals, areas, rs
 
-    def outer_edge_grid(self, n_z=20, n_nu=80, n_nu_wall=None):
+    def outer_edge_grid(self, n_z=20, n_nu=80, n_nu_wall=None, nu_refine=None, refine_factor=4.0):
         """
         Outer-edge wall at r=rim(nu): a vertical face (constant-nu column
         spanning z in [-h,h], h=rim(nu)*tan(opening_angle)) with outward
@@ -283,16 +283,45 @@ class Disc:
         standalone/backward-compatible use) -- see render.wall_aspect_ratio
         for why the wall usually wants a very different n_z:n_nu split
         than the cone surfaces it shares a caller with.
+
+        nu_refine: optional (nu_lo, nu_hi) [rad] azimuthal window --
+        typically the stream-impact hot spot's own span, see
+        render.build_temperature_maps -- sampled roughly refine_factor
+        times denser than the rest of the rim, at the SAME total
+        n_nu_wall budget (just reallocated, not increased): the hot
+        spot's temperature varies sharply over a small azimuthal range
+        that a uniform grid under-resolves, while the rest of the rim
+        (a much smoother, slowly-varying T(r)) doesn't need the same
+        density. nu_hi is taken as nu_lo + ((nu_hi-nu_lo) mod 2*pi), so
+        it wraps the same way the hot spot's own dphi does; a window
+        spanning the (or more than the) full circle degenerates to the
+        plain uniform grid. None (default) keeps that uniform grid.
         """
         if n_nu_wall is None:
             n_nu_wall = n_nu
         tanA = np.tan(self.opening_angle)
-        nu = np.linspace(0.0, 2.0 * np.pi, n_nu_wall, endpoint=False)
-        dnu = 2.0 * np.pi / n_nu_wall
+        if nu_refine is None:
+            nu = np.linspace(0.0, 2.0 * np.pi, n_nu_wall, endpoint=False)
+            dnu = np.full(n_nu_wall, 2.0 * np.pi / n_nu_wall)
+        else:
+            nu_lo, nu_hi = nu_refine
+            window = (nu_hi - nu_lo) % (2.0 * np.pi)
+            rest = 2.0 * np.pi - window
+            if window <= 0.0 or rest <= 0.0:
+                nu = np.linspace(0.0, 2.0 * np.pi, n_nu_wall, endpoint=False)
+                dnu = np.full(n_nu_wall, 2.0 * np.pi / n_nu_wall)
+            else:
+                frac_in = (window * refine_factor) / (window * refine_factor + rest)
+                n_in = int(np.clip(round(n_nu_wall * frac_in), 1, n_nu_wall - 1))
+                n_out = n_nu_wall - n_in
+                nu_in = np.linspace(nu_lo, nu_lo + window, n_in, endpoint=False)
+                nu_out = np.linspace(nu_lo + window, nu_lo + 2.0 * np.pi, n_out, endpoint=False)
+                nu = np.concatenate([nu_in, nu_out])
+                dnu = np.concatenate([np.full(n_in, window / n_in), np.full(n_out, rest / n_out)])
         s = (0.5 + np.arange(n_z)) / n_z * 2.0 - 1.0  # cell centers in [-1,1]
         ds = 2.0 / n_z
         xs, ys, zs, nxs, nys, nzs, areas, rs = [], [], [], [], [], [], [], []
-        for nu_i in nu:
+        for nu_i, dnu_i in zip(nu, dnu):
             R_rim = self.rim(nu_i)
             if R_rim <= self.r_in or self.opening_angle <= 0.0:
                 continue
@@ -304,7 +333,7 @@ class Disc:
             nxs.append(np.full(n_z, cos_nu))
             nys.append(np.full(n_z, sin_nu))
             nzs.append(np.zeros(n_z))
-            areas.append(np.full(n_z, R_rim * h * ds * dnu))
+            areas.append(np.full(n_z, R_rim * h * ds * dnu_i))
             rs.append(np.full(n_z, R_rim))
         cat = lambda a: np.concatenate(a) if a else np.array([])
         xs, ys, zs, nxs, nys, nzs, areas, rs = (cat(a) for a in
@@ -342,7 +371,8 @@ class Disc:
         rs = np.full(n_nu_wall * n_z, self.r_in)
         return xs, ys, zs, np.stack([nxs, nys, nzs], axis=-1), areas, rs
 
-    def all_surfaces_grid(self, n_r=40, n_nu=80, n_z=20, n_nu_wall=None):
+    def all_surfaces_grid(self, n_r=40, n_nu=80, n_z=20, n_nu_wall=None,
+                           nu_refine=None, refine_factor=4.0):
         """
         Concatenation of all four surfaces (upper cone, lower cone, outer
         edge, inner edge): returns (x,y,z,normals,areas,r,surface_id),
@@ -352,6 +382,10 @@ class Disc:
         n_nu_wall: see outer_edge_grid's docstring -- the wall surfaces'
         own azimuthal resolution, independent of the cone surfaces' n_nu
         (defaults to n_nu if not given).
+
+        nu_refine/refine_factor: forwarded to outer_edge_grid ONLY (see
+        its own docstring) -- the hot spot lives on the outer rim alone,
+        so there's nothing for the inner wall to refine around.
 
         The outer and inner walls' combined budget (2*n_z*n_nu_wall --
         what this signature always represented in total, split evenly
@@ -375,7 +409,8 @@ class Disc:
         parts = [
             (0, self.upper_cone_grid(n_r=n_r, n_nu=n_nu)),
             (1, self.lower_cone_grid(n_r=n_r, n_nu=n_nu)),
-            (2, self.outer_edge_grid(n_z=n_z_o, n_nu=n_nu, n_nu_wall=n_nu_o)),
+            (2, self.outer_edge_grid(n_z=n_z_o, n_nu=n_nu, n_nu_wall=n_nu_o,
+                                      nu_refine=nu_refine, refine_factor=refine_factor)),
             (3, self.inner_edge_grid(n_z=n_z_i, n_nu=n_nu, n_nu_wall=n_nu_i)),
         ]
         xs, ys, zs, normals, areas, rs, ids = [], [], [], [], [], [], []

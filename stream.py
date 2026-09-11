@@ -66,17 +66,24 @@ def integrate_stream(lobe, eps=0.02, t_max=8.0, r_min_primary=0.02, max_step=0.0
     the secondary (+x, the usual convention -- see e.g.
     disc_impact_index's own nu) and 180 deg directly behind the primary;
     may exceed 360 to let the trajectory loop around the primary more
-    than once. None (the default) instead keeps the original behavior:
-    stop as soon as the particle first comes within r_min_primary of the
-    primary. r_min_primary remains an active safety floor even when
-    stream_angle_deg is given (the particle plunging into the primary
-    before ever accumulating that much angle -- it would then be
-    accreted directly / the ballistic approximation breaks down); either
-    way, also stops at t_max if neither condition is reached first --
-    scaled up automatically when stream_angle_deg asks for more than
-    half an orbit around the primary, since the default t_max is sized
-    for the original single-pass behavior (a generous heuristic, not a
-    real estimate: how long "once around" actually takes depends on how
+    than once. None (the default) instead stops at the trajectory's own
+    FIRST turnaround -- the first local minimum of r1 (distance from the
+    primary), d(r1)/dt crossing from negative to positive, typically
+    around half an orbit (~180 deg) after leaving L1 -- rather than
+    continuing on regardless (which would otherwise, for many systems,
+    loop around the primary several more times before r_min_primary or
+    t_max finally stopped it, none of which is the physically relevant
+    part of the trajectory: a free-falling test particle isn't a real
+    accretion stream once it's past its own first pericenter passage).
+    r_min_primary remains an active safety floor either way (the
+    particle plunging into the primary before ever turning around, or
+    before reaching stream_angle_deg -- it would then be accreted
+    directly / the ballistic approximation breaks down); either way,
+    also stops at t_max if neither condition is reached first -- scaled
+    up automatically when stream_angle_deg asks for more than half an
+    orbit around the primary, since the default t_max is sized for the
+    original single-pass behavior (a generous heuristic, not a real
+    estimate: how long "once around" actually takes depends on how
     deep/eccentric the periapsis passage is, which isn't known in
     advance).
 
@@ -112,6 +119,22 @@ def integrate_stream(lobe, eps=0.02, t_max=8.0, r_min_primary=0.02, max_step=0.0
 
     events = [hit_primary]
     t_span_max = t_max
+    if stream_angle_deg is None:
+        # d(r1)/dt = ((x-x1)*vx + y*vy) / r1 -- negative while
+        # approaching the primary, crossing zero (direction=1: from
+        # negative to positive) exactly at the first local minimum of
+        # r1, i.e. the trajectory's own first pericenter passage. Not
+        # added when stream_angle_deg is given -- that's an explicit
+        # request to let the trajectory continue past this point
+        # (possibly around the primary more than once), which this
+        # event would otherwise cut short right away.
+        def turnaround(t, state, *_args):
+            x, y, vx, vy = state[0], state[1], state[2], state[3]
+            r1 = np.hypot(x - x1, y)
+            return ((x - x1) * vx + y * vy) / max(r1, 1e-300)
+        turnaround.terminal = True
+        turnaround.direction = 1
+        events.append(turnaround)
     if stream_angle_deg is not None:
         target_theta = np.radians(stream_angle_deg)
 
@@ -135,9 +158,19 @@ def integrate_stream(lobe, eps=0.02, t_max=8.0, r_min_primary=0.02, max_step=0.0
 
     r1_all = np.hypot(x - x1, y)
     i_min = int(np.argmin(r1_all))
+    # angle_deg itself is the cumulative (unwrapped) swept azimuth (see
+    # this function's own docstring) -- genuinely past 360 deg whenever
+    # the ballistic trajectory loops around the primary more than once
+    # before settling into its closest approach (common for a disc-
+    # accreting system, since integrate_stream is deliberately NOT
+    # stopped by a disc -- "the stream is not stopped by a disc by
+    # default", see the README). The bare cumulative value alone reads
+    # as a bug at a glance, so also report the equivalent [0,360) azimuth
+    # (same convention as disc_impact_index's own nu) alongside it.
     print(f"stream: closest approach to primary r={r1_all[i_min]:.6g} (units of a) "
-          f"at angle={angle_deg[i_min]:.6g} deg, "
-          f"final r={r1_all[-1]:.6g} (units of a) at angle={angle_deg[-1]:.6g} deg")
+          f"at angle={angle_deg[i_min]:.6g} deg ({angle_deg[i_min] % 360.0:.6g} deg mod 360), "
+          f"final r={r1_all[-1]:.6g} (units of a) "
+          f"at angle={angle_deg[-1]:.6g} deg ({angle_deg[-1] % 360.0:.6g} deg mod 360)")
 
     return {
         "t": sol.t, "x": x, "y": y, "vx": vx, "vy": vy, "s": s, "angle_deg": angle_deg,
@@ -192,6 +225,154 @@ def impact_azimuth(lobe, disc, eps=0.02):
     if idx is None:
         return None
     return float(np.arctan2(traj["y"][idx], traj["x"][idx] - lobe.x1))
+
+
+def disc_impact_point(lobe, disc, eps=0.02):
+    """
+    The richer version of impact_azimuth: the full state (x, y, vx, vy,
+    r1) of the ballistic stream at the point it first enters the disc's
+    rim, not just its azimuth -- vx,vy give the stream's own local
+    direction of travel there (needed to orient e.g. a cross-section
+    ellipse perpendicular to it, see plots.stream_impact_ellipse_outline),
+    r1 its distance from the primary (units of a, this module's
+    convention -- the argument lubow_shu_stream_size's own
+    h1(r1)/w1(r1) fits expect). Returns None in the same cases
+    impact_azimuth/disc_impact_index do (trajectory never reaches this
+    disc).
+
+    disc_impact_index only ever returns the first discrete trajectory
+    sample already inside the rim, which can overshoot the true r ==
+    disc.rim(nu) crossing by a full integration step -- for a coarsely
+    sampled trajectory that overshoot can exceed the stream's own
+    cross-sectional H/W (Hessman 1999's Lubow & Shu fits), burying a
+    cross-section ellipse drawn around the raw sample entirely inside the
+    disc's own solid and making it permanently self-occluded. So refine:
+    linearly interpolate x,y,vx,vy between that sample and the one just
+    before it (still outside the rim, by disc_impact_index's own "first
+    inside" definition) to the sub-step point where r(t) == rim(nu(t)),
+    treating both r-rim(nu) and the state itself as linear over the one
+    step in between -- exact for a straight sub-step, and a good
+    approximation otherwise since the step is already the trajectory's
+    own finest resolution there.
+    """
+    traj = integrate_stream(lobe, eps=eps)
+    idx = disc_impact_index(traj, disc.rim, lobe.x1)
+    if idx is None:
+        return None
+    x1 = lobe.x1
+    x, y = float(traj["x"][idx]), float(traj["y"][idx])
+    vx, vy = float(traj["vx"][idx]), float(traj["vy"][idx])
+    if idx > 0:
+        x0, y0 = float(traj["x"][idx - 1]), float(traj["y"][idx - 1])
+        vx0, vy0 = float(traj["vx"][idx - 1]), float(traj["vy"][idx - 1])
+        f0 = np.hypot(x0 - x1, y0) - float(disc.rim(np.arctan2(y0, x0 - x1)))
+        f1 = np.hypot(x - x1, y) - float(disc.rim(np.arctan2(y, x - x1)))
+        if f0 >= 0.0 and f1 <= 0.0 and (f0 - f1) > 0.0:
+            t = f0 / (f0 - f1)
+            x, y = x0 + t * (x - x0), y0 + t * (y - y0)
+            vx, vy = vx0 + t * (vx - vx0), vy0 + t * (vy - vy0)
+    return {"x": x, "y": y, "vx": vx, "vy": vy, "r1": float(np.hypot(x - x1, y))}
+
+
+def impact_incidence(impact, disc):
+    """
+    (nu_imp, cos_incidence) at a disc_impact_point() result -- shared by
+    every caller that needs the stream's own incidence angle there
+    (plots.plot_disc_rim_projection's ellipse-width stretch, simulate.py's
+    rim-projection-mode fit target, simulate.py's own impact-point
+    diagnostic print). nu_imp [rad] is the impact azimuth, from +x
+    through the primary; cos_incidence is |cos| of the angle between the
+    stream's own velocity there and the disc rim's own LOCAL OUTWARD
+    NORMAL at that azimuth -- 1.0 for a perfectly radial ("head-on")
+    impact, 0.0 for a perfectly tangential ("grazing") one. Clamped away
+    from exactly 0 (a genuinely tangential impact would otherwise blow up
+    any 1/cos_incidence use, e.g. the ellipse stretch above) at 1e-3.
+
+    The rim's local outward normal is only the pure radial direction
+    r_hat=(cos nu, sin nu) when the rim itself is circular (disc.e==0):
+    for an eccentric rim R(nu)=disc.rim(nu), the curve's own tangent has
+    a radial component too (proportional to dR/dnu, its "pitch"), zero
+    only exactly at periastron/apastron. Writing r_hat/t_hat for the
+    ordinary radial/azimuthal unit vectors at nu_imp, the curve's own
+    local tangent/normal are instead
+        T_hat = (R'*r_hat + R*t_hat) / sqrt(R^2+R'^2)
+        N_hat = (R*r_hat - R'*t_hat) / sqrt(R^2+R'^2)
+    (T_hat.N_hat=0 by construction; both reduce to t_hat/r_hat exactly
+    when R'=0) -- R' from a small central-difference step of disc.rim
+    itself, so this holds for whatever rim shape disc.rim implements, not
+    just the eccentric-ellipse formula it currently is.
+    """
+    nu_imp = np.arctan2(impact["y"], impact["x"] - disc.x1)
+    r_hat = np.array([np.cos(nu_imp), np.sin(nu_imp)])
+    t_hat = np.array([-np.sin(nu_imp), np.cos(nu_imp)])
+    dnu = 1e-6
+    R = float(disc.rim(nu_imp))
+    Rprime = float(disc.rim(nu_imp + dnu) - disc.rim(nu_imp - dnu)) / (2.0 * dnu)
+    n_hat_imp = (R * r_hat - Rprime * t_hat) / np.hypot(R, Rprime)
+    v_imp = np.array([impact["vx"], impact["vy"]])
+    v_imp = v_imp / np.hypot(*v_imp)
+    cos_incidence = max(abs(np.dot(v_imp, n_hat_imp)), 1e-3)
+    return nu_imp, cos_incidence
+
+
+def lubow_shu_eps(T_2, P_orb_d, a_m):
+    """
+    The dimensionless stream sound speed eps = c_s(T_2)/(Omega*a) -- this
+    module's own `eps` parameter above (integrate_stream's initial-
+    velocity scale) -- computed from real system parameters via Hessman
+    (1999)'s own fit (that paper's Eq. 1), rather than left at the
+    assumed-constant default (0.02) integrate_stream otherwise uses:
+
+        eps = 0.013 * sqrt(T_2/4000 K) * (P_orb/4 h) / (a/1e11 cm)
+
+    T_2 [K], P_orb_d [d] (converted to hours here), a_m [m] (converted to
+    cm here) -- SystemParams' own native units (see params.py's own
+    docstring), so callers can pass system.T_2/system.P_orb/system.a_m
+    directly (system.a itself is in Rsun, not meters -- a_m is its SI
+    conversion).
+    """
+    P_orb_h = P_orb_d * 24.0
+    a_cm = a_m * 100.0
+    return 0.013 * np.sqrt(T_2 / 4000.0) * (P_orb_h / 4.0) / (a_cm / 1.0e11)
+
+
+def lubow_shu_stream_size(r1, q, eps):
+    """
+    The ballistic stream's own transverse size at a point r1/a from the
+    primary (r1 already in units of a, this module's convention -- see
+    e.g. disc_impact_point's own "r1"), via Hessman (1999)'s fits (that
+    paper's Fig. 1 and Eq. 3-4) to the Lubow & Shu (1975) stream
+    hydrodynamics -- separable in r1/a and mass ratio q:
+
+        H(r1,q) = h1(r1)*h2(q)*a*eps   (vertical, perpendicular to the
+                                         orbital plane)
+        W(r1,q) = w1(r1)*w2(q)*a*eps   (horizontal, in the orbital plane,
+                                         transverse to the stream's own
+                                         direction of travel)
+
+    with (Hessman 1999's own Eq. 4, base-10 log):
+        h1(r1) = 0.060 + 3.17*r1 - 2.90*r1^2
+        w1(r1) = 0.084 + 3.09*r1 - 3.08*r1^2
+        h2(q)  = 10**(0.031*log10(q) + 0.095*log10(q)**2)
+        w2(q)  = 10**(-0.021*log10(q) + 0.087*log10(q)**2)
+
+    r1 already in units of a makes the "*a" above implicit -- H and W
+    are returned directly in units of a, this codebase's own convention
+    for every other geometric quantity. Both are SCALEHEIGHTS -- already
+    a one-sided, half-width/half-height quantity, appropriate directly
+    as an ellipse's own semi-axis (see plots.stream_impact_ellipse_outline)
+    or as a single-sided offset from the stream's own centerline (see
+    plot_topdown_shadows' T_2/P_orb/a_m handling) -- NOT half of that;
+    the stream's own FULL transverse extent is 2*H, 2*W.
+
+    r1/q accept arrays; returns (H, W), each the same shape as r1.
+    """
+    h1 = 0.060 + 3.17 * r1 - 2.90 * r1 ** 2
+    w1 = 0.084 + 3.09 * r1 - 3.08 * r1 ** 2
+    logq = np.log10(q)
+    h2 = 10.0 ** (0.031 * logq + 0.095 * logq ** 2)
+    w2 = 10.0 ** (-0.021 * logq + 0.087 * logq ** 2)
+    return h1 * h2 * eps, w1 * w2 * eps
 
 
 def closest_approach_index(traj, x1):
@@ -258,3 +439,58 @@ def sample_points(traj, s_values):
     x = np.interp(s_values, traj["s"], traj["x"])
     y = np.interp(s_values, traj["s"], traj["y"])
     return x, y
+
+
+def near_primary_flank_distance(lobe, T_2, P_orb_d, a_m, point, s_max=None, n=600):
+    """
+    Minimum distance from `point` (x,y) [corotating frame] to the
+    ballistic stream's own NEAR-PRIMARY Lubow & Shu flanking line (see
+    lubow_shu_stream_size's own half-width W, and plots.
+    plot_topdown_shadows' matching +-W overlay): of the two +-W offset
+    lines flanking the trajectory's centerline, "near-primary" means
+    whichever one sits at the smaller distance from the primary AT THE
+    POINT ALONG THE CENTERLINE closest to `point` -- the physically
+    meaningful edge for simulate.py's shadow-mode --lsq_fit/--mcmc_fit
+    (see its own docstring): the eclipse-timing-derived shadow crossing
+    this measures against should sit on the stream's own near edge, not
+    its far one.
+
+    Approximated via n dense, evenly-arclength-spaced samples along the
+    trajectory (not a further local refinement beyond that) -- called
+    many times per fit trial, so this stays a single vectorized pass;
+    finer sampling (raise n) rather than a slower local polish is the
+    lever available if a fit needs more precision than this gives.
+
+    s_max: truncate the trajectory's own arclength there (None: its
+    first closest approach to the primary, the same default
+    plot_topdown_shadows/plot_component_outlines use).
+
+    Returns the scalar distance (units of a).
+    """
+    traj = integrate_stream(lobe)
+    if s_max is None:
+        idx = closest_approach_index(traj, lobe.x1)
+        if idx is None:
+            idx = len(traj["x"]) - 1
+        s_max = traj["s"][idx]
+    s_vals = np.linspace(0.0, s_max, n)
+    xc, yc = sample_points(traj, s_vals)
+    px, py = point
+
+    tangent = np.gradient(np.stack([xc, yc], axis=-1), axis=0)
+    tangent /= np.maximum(np.linalg.norm(tangent, axis=-1, keepdims=True), 1e-300)
+    perp = np.stack([-tangent[:, 1], tangent[:, 0]], axis=-1)
+    eps = lubow_shu_eps(T_2, P_orb_d, a_m)
+    r1 = np.hypot(xc - lobe.x1, yc)
+    _, half = lubow_shu_stream_size(r1, lobe.q, eps)
+
+    i0 = int(np.argmin(np.hypot(xc - px, yc - py)))
+    r1_plus = np.hypot(xc[i0] + half[i0] * perp[i0, 0] - lobe.x1,
+                        yc[i0] + half[i0] * perp[i0, 1])
+    r1_minus = np.hypot(xc[i0] - half[i0] * perp[i0, 0] - lobe.x1,
+                         yc[i0] - half[i0] * perp[i0, 1])
+    sign = 1.0 if r1_plus < r1_minus else -1.0
+
+    xf = xc + sign * half * perp[:, 0]
+    yf = yc + sign * half * perp[:, 1]
+    return float(np.min(np.hypot(xf - px, yf - py)))

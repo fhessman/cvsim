@@ -1,6 +1,6 @@
 # cvsim
 
-A Roche-lobe binary-star eclipse simulator for cataclysmic variables (CVs),
+A Roche-lobe binary-star eclipse simulator for close binary systems and cataclysmic variables (CVs),
 including magnetic CVs ("polars"). 
 
 This collection of python scripts was written with the help of Claude Code
@@ -43,19 +43,28 @@ the config/CLI boundary and get converted internally.
   be stopped at the disc rim or at particular magnetic field line, e.g. when a magnetic
   connection point lies beyond that first approach.  Note that the stream is not stopped
   by a disc by default, but the corresponding angle can be chosen to do so (so that
-  overflow can be simulated).
+  overflow can be simulated). The stream's own transverse size
+  (half-width/half-height, Hessman 1999's fits to the Lubow & Shu
+  hydrodynamics) is drawn as a swept "tube" around the centerline in the
+  `outline`/`primary` outputs, with distinct cross-section markers at its
+  start (near L1) and its end (at the disc or primary) -- also overlaid on
+  the physical `temperature`/`intensity` renders, as a reference for how
+  that analytic width compares to what's actually simulated there.
 - **Accretion disc** (`disc.py`, optional) -- considered only if `R_in`,
   `R_out`, `T_0`, and `beta_d` are *all* given. The rim is a Kepler
   ellipse focused on the primary (semi-major axis, eccentricity,
   periapsis angle), and surface temperature follows a radial power law
   `T(R) = T_0*(R/R_in)^beta_d`. A disc can optionally be given nonzero
-  thickness defined by non-zero constant opening angle `beta_d`.
-  If the `T_h` and `L_h`
-  parameters are given, then a "hot spot" on the disc's outer rim starting
-  at the accretion stream's impact point is created, where the 
-  disc rim's temperature then exponentially decreases with an angular scale `L_h`
-  until it reaches the disc's normal temperature. Note that - using this recipe -
-  no hotspot emission is visible when i=0!
+  thickness via a constant half-opening angle `alpha_d`.
+- **`Bright spot`** (`disc.py`, optional) -- If a disc exists and`T_h` and
+  `L_h` are given, a "bright spot" is added on the disc's outer rim in two
+  steps: the temperature of the patch actually struck by the stream (its own physical
+  footprint on the rim, the same oblique-projection-stretched ellipse
+  the outline/primary views draw) is set to `T_h`, and downstream
+  of the central impact point the disc rim's temperature decays as
+  `T_h*exp(-dphi/L_h)` until it drops back to the disc's own local
+  temperature. Note that -- using this recipe -- no bright spot emission is
+  visible when i=0!
 - **Magnetic channeling / "polar" accretion** (`magnetic.py`) -- used for
   simulating a system where the
   primary's magnetic field disrupts disc formation (AM Her being
@@ -88,9 +97,12 @@ the config/CLI boundary and get converted internally.
 | `outline` | Sky-projected geometry (Roche lobe, disc, stream, dipole field-line loops, accretion-spot connection) at each requested phase -- one PNG per phase. |
 | `temperature` | Rendered surface-temperature image (K) at each phase -- one PNG per phase. |
 | `intensity` | Rendered surface-brightness image (band intensity, W/m^2/sr/m), the one that actually shows limb-darkening effects -- one PNG per phase. |
-| `lightcurve` | The eclipse light curve as relative flux [mJy] vs. orbital phase, all phases on one plot, with a mirrored AB-magnitude axis; overlays observed data if `--data-file` is given. |
+| `lightcurve` | The eclipse light curve as relative flux [mJy] vs. orbital phase, always sampled from `phase-min`/`phase-max`/`phase-num` (even when `phase-list` is also set -- a curve needs an evenly sampled phase axis), all phases on one plot, with a mirrored AB-magnitude axis. Overlays observed data if `--data-file` is given, a dashed `flux_offset` reference line if it's nonzero, and dotted vertical markers at any `phase-list` phases. |
 | `magnitude` | Same underlying computation as `lightcurve`, plotted with AB magnitude as the primary axis instead (whichever the observed data's own units are takes the primary axis automatically, when data is given). `lightcurve`/`magnitude` together (or either alone) also write one FITS binary table with both units, phase-resolved, plus every system/model parameter used in the header. |
 | `shadow` | Top-down (face-on) view of the eclipse footprint: which parts of the disc/stream are shadowed/occulted, swept across the requested phase range. |
+| `rim projection` | The stream's own cross-section ellipse and the disc's outer rim wall "unrolled" into a flat (arc-length, height) strip, with the eclipse boundary curves at the four `phase-list` contact phases overlaid -- a diagnostic for how well a given geometry lines up with observed contact-phase timings, independent of viewing-angle foreshortening. |
+| `primary` | The same projected geometry as `outline`, at a fixed reference phase, with the secondary's own limb position at each of the four `phase-list` contact phases overlaid for comparison against the modelled primary/disc/stream shapes. |
+| `fit system` | No plot -- a joint least-squares (`--lsq_fit`) or MCMC (`--mcmc_fit`) fit of any subset of `q`, `incl`, `R_1`, `R_out` against all 8 eclipse contact phases at once (4 primary-eclipse + 4 bright-spot, from `--phase-list`), printing the covariance matrix and propagated 1-sigma parameter errors, plus (whenever `R_1` is fit) the Nauenberg (1972) white-dwarf mass-radius relation's derived `M_1`, `M_2`, `R_1`/`R_2` [Rsun], the orbital separation, and the radial-velocity amplitudes `K_1`/`K_2` -- all with propagated errors. The `shadow`/`primary`/`rim projection` outputs support the same `--lsq_fit`/`--mcmc_fit` machinery (with just their own 4 contact phases) and report the same covariance/error information. |
 | `rv` | Radial-velocity curves (km/s) for the primary, secondary, accretion stream, and magnetically-channeled stream, computed *separately* (intensity-and-limb-darkening-weighted median line-of-sight velocity of each component's visible material), plus the two stars' circular Roche-point velocities as reference. Overlays observed RV data if any `--data_rv_*_col` is given. |
 | `corner` | Not a `--outputs` choice itself -- produced automatically by `--mcmc_fit` when `--corner_plot` is set: the classic posterior pairwise-correlation plot. |
 
@@ -99,7 +111,20 @@ the config/CLI boundary and get converted internally.
 `--phase-num>1` sweeps `linspace(--phase-min, --phase-max, --phase-num)` --
 `outline`/`temperature`/`intensity` then write one file per phase, while
 `lightcurve`/`magnitude`/`shadow`/`rv` always plot every phase together on
-one figure regardless.
+one figure regardless. `--phase-list` (a comma-separated list of exact
+phases) overrides `--phase-min`/`--phase-max`/`--phase-num` for every
+output *except* `lightcurve`/`magnitude`, which always sample their curve
+from the min/max/num sweep and instead show `--phase-list`'s own phases
+as dotted reference lines; `shadow`/`primary`/`rim projection` need
+exactly 4 phases (the four eclipse contact points) and `fit system` needs
+8 (the same 4, plus 4 for the bright spot) whenever `--lsq_fit`/
+`--mcmc_fit` is also set. `--phase_error` gives each of those phases its
+own timing uncertainty [cycles] (one value applied to all of them, or a
+matching list), used to build a real chi^2 for the fit and to draw
+dashed +/- `phase_error` flanking curves in the diagram outputs.
+`primary`/`rim projection` always draw all of `--phase-list` together on
+one figure, same as `shadow`; `fit system` produces no plot at all, only
+the printed fit results.
 
 ## 3. How the YAML config files work
 
@@ -121,15 +146,16 @@ two ways:
   file but only pulls defaults for fields that are actual
   `SystemParams`/`ModelParams` dataclass fields (see `params.py`):
   `P_orb, a, q, R_1, T_1, T_2, incl, wavelength, u_1, u_2, R_2, ph_off,
-  theta_1, phi_1` (SystemParams) and `R_in, R_out, T_0, beta_d, T_h, L_h,
+  theta_1, phi_1, flux_offset` (SystemParams) and `R_in, R_out, T_0, beta_d, T_h, L_h,
   beta_grav, e_d, omega_d, alpha_d, u_d, angle_acc, spot_acc, T_acc, u_acc`
   (ModelParams).
 
 **The gotcha:** every *other* field in a config -- `--outputs`,
-`--phase-min/-max/-num`, `--n_areas_*`, `--n_field_1`, `--stream_angle`,
-`--outdir`, `--prefix`, `--save-irradiation`/`--load-irradiation`, every
-`--data*`/`--data_rv_*` flag, `--lsq_fit`/`--mcmc_fit` and its knobs,
-`--no-irradiate`, `--workers`, `--pixelmapping`, `--image-size`,
+`--phase-min/-max/-num`, `--phase-list`, `--phase_error`, `--n_areas_*`,
+`--n_field_1`, `--stream_angle`, `--outdir`, `--prefix`,
+`--save-irradiation`/`--load-irradiation`, every `--data*`/`--data_rv_*`
+flag, `--lsq_fit`/`--mcmc_fit` and its knobs, `--no-irradiate`,
+`--workers`, `--pixelmapping`, `--image-size`,
 `--vmin`/`--vmax` -- is a **plain** argparse flag, not a dataclass field.
 A bare `python simulate.py --config file.yaml` does **not** pick up that
 field's YAML default; those only take effect when the config is driven
@@ -143,17 +169,33 @@ own `--<field_name>` flag on the plain CLI, config or not.)
 The binary's physically "given" parameters:
 - the simulation label/file prefix `prefix`;
 - the orbital period `P_orb` [d];
-- the orbital separation `a` [m];
+- the orbital separation `a` [R_sun];
 - the mass-ratio `q` (M2/M1);
 - the orbital inclination`incl` [deg];
 - the distance `dist` [pc] (scales the light curve to a real flux density);
-- the observed `wavelength` [Angstrom].
+- the observed `wavelength` [Angstrom];
+- an additive `flux_offset` [mJy] for light this model doesn't capture
+  (e.g. third light/background contamination) -- applied to the light
+  curve's own total *after* the `dist` scaling above, so (unlike every
+  other flux here) it does not depend on distance; shown as its own
+  dashed reference line in the `lightcurve`/`magnitude` outputs.
 
 ### PHASES
 Shared by every phase-dependent output:
 - the number of phases used `phase-num`;
 - minimum & maximum phases `phase-min` and `phase-max` (a single phase is
-  used if `phase-num`=1, else the sweep range).
+  used if `phase-num`=1, else the sweep range);
+- an explicit `phase-list` (comma-separated exact phases), which
+  overrides `phase-min`/`phase-max`/`phase-num` for every output *except*
+  `lightcurve`/`magnitude` (those always sample their curve from the
+  min/max/num sweep and instead show `phase-list`'s own phases as dotted
+  reference lines) -- exactly 4 phases (the eclipse contact points) for a
+  `shadow`/`primary`/`rim projection` fit, 8 for a `fit system` fit;
+- a per-phase timing uncertainty `phase_error` [cycles] on those
+  `phase-list` phases (one value applied to all of them, or a
+  comma-separated list matching their count) -- used to build a real
+  chi^2 for `lsq_fit`/`mcmc_fit` and to draw dashed +/- `phase_error`
+  flanking curves in the diagram outputs.
 
 ### PRIMARY
 Properties of the primary object:
@@ -245,6 +287,16 @@ Parameters controlling the fitting of simulations with observed data:
 - `spread` is the starting dispersion used to initialize the MCMC sampling;
 - `corner_plot` is a flag to indicate that an MCMC corner plot is desired.
 
+`lsq_fit`/`mcmc_fit` against `phase-list`'s own contact phases (rather
+than observed data) is also how the `shadow`, `primary`, `rim
+projection`, and `fit system` outputs fit `q`/`incl`/`R_1`/`R_out` (any
+subset) -- see Section 2. Every such fit prints the full covariance
+matrix and propagated 1-sigma parameter errors, and, whenever `R_1` is
+among the fitted parameters, the Nauenberg (1972) white-dwarf
+mass-radius relation's derived `M_1`, `M_2`, `R_1`/`R_2` [Rsun], and (for
+`fit system` specifically) the orbital separation and radial-velocity
+amplitudes `K_1`/`K_2` -- all with their own propagated errors.
+
 ### MISC
 Various parameters affecting the simulation:
 - `no-irradiate` is a flag indicating if the irradiation of all surface areas should be
@@ -256,7 +308,7 @@ Various parameters affecting the simulation:
 
 ## 5. Examples
 
-The three configs under `examples/` represent real systems, each set up to show
+The configs under `examples/` represent real systems, each set up to show
 off a different part of the model. The images below are each config's own
 default `outline` output -- every field left at its own recorded YAML
 default (the same values `gui.py` would show on load), saved to
@@ -284,6 +336,28 @@ all viewed close to the
 secondary eclipse (`phase=-0.1`) where the disc's near side is
 partially hidden behind the secondary.
 
+### Z Cha analyses of Wood et al. (1986)
+
+All of the configuration files named `ZCha_WoodEtAl_1986_Fig*.yaml` will create the
+corresponding figure from this classic eclipse analysis paper, showing that `cvsim`
+can be used to do real analysis.
+
+![Z Cha Fig. 5a (shadow)](examples/outputs/ZCha_WoodEtAl_1986_Fig5a_shadow.png)
+
+This is a "shadow" plot showing the geometric constraints on the location of the bright spot in the orbital plane.  The curved lines are the limbs of the secondary projected onto the orbital plane and the parallel running dashed lines represent the phase errors (when given).
+
+![Z Cha Fig. 5b (rim projection)](examples/outputs/ZCha_WoodEtAl_1986_Fig5b_rim_projection.png)
+
+This is a "rim projection" plot showing the geometric constraints on the location of the bright spot as projected onto the disc rim.
+The projected cross-section of the stream is also shown.  As in the previous plot, the dashed lines represent the effects of phase errors (when given).
+
+![Z Cha Fig. 7 (primary)](examples/outputs/ZCha_WoodEtAl_1986_Fig7_primary.png)
+
+This is a "primary" plot showing the geometric constraints on the location and size of the primary.
+The projection this time is along the line-of-sight to the observer and the different limb projections are for each phase input, aligned with the primary (normally, both the primary and the projected limbs would show more motion in the sky plane).
+The dashed lines again represent the effects of phase errors.
+
+
 ### AM Her
 
 ![AM Her outline](examples/outputs/AMHer_plot_0.250000.png)
@@ -299,6 +373,11 @@ V-band photometry (`./examples/data/`): to produce a lightcurve, simply
 - change the output to "magnitude" (lightcurve for data in magnitudes),
 - change the displayed phases from a single phase to multiple phases (e.g.
 101 points from phase -0.5 to 0.5), and run again.
+
+If one wants to have two-pole accretion, simply extend the accretion stream
+(e.g. to 180 degrees, directly behind the primary) and append the angles of
+the new accreting magnetic field lines (e.g. ...,170,180 so that the last
+accreting magnetic field lines occur at the end of the stream).
 
 ### EX Hya
 

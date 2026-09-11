@@ -1,4 +1,4 @@
-script_path: ./simulate.py
+script_path: ../simulate.py
 python_executable: null
 layout: tabs
 panes:
@@ -9,38 +9,44 @@ panes:
     type: str
     tip: Shown as every plot's title, and used (with any blanks replaced by '_') as
       the output filename prefix; defaults to the config file's basename if left blank
-    default: bare cvsim
+    default: Z Cha Wood+1986
   - flag: --P_orb
     label: orbital period P_orb [d]
     type: float
     tip: P_orb
-    default: '0.0745'
+    default: '0.0744993246'
   - flag: --a
     label: orbital separation a [R_sun]
     type: float
     tip: a
-    default: '0.7363566'
+    default: '0.634'
   - flag: --q
     label: mass ratio q [M2/M1]
     type: float
     tip: q
-    default: '0.14880952'
+    default: '0.1495'
   - flag: --incl
     label: inclination i [deg]
     type: float
     tip: incl
     default: '0'
+  - flag: --dist
+    label: observer dist [pc]
+    type: float
+    tip: Scales the light curve from a relative flux to a real spectral flux density
+      [mJy] at this distance
+    default: '100.0'
   - flag: --wavelength
     label: wavelength [A]
     type: float
     tip: wavelength (defaults to V-band, 5500 A)
-    default: '5500.0'
+    default: '5500'
   - flag: --flux_offset
     label: flux offset [mJy]
     type: float
-    tip: Additive flux offset applied to the light curve's own total AFTER distance
-      scaling -- independent of --dist, unlike every other flux here. For light this
-      model doesn't capture (e.g. third light/background contamination).
+    tip: Additive flux offset applied to the light curve's own total AFTER distance scaling
+      -- independent of --dist, unlike every other flux here. For light this model doesn't
+      capture (e.g. third light/background contamination).
     default: '0.0'
 - title: PHASES
   arguments:
@@ -49,7 +55,8 @@ panes:
     type: float
     tip: Orbital phase (phase-num=1) or phase range start (phase-num>1), for every
       phase-dependent output. Default 0.25/0.25/1 is deliberately a single, harmless
-      phase -- widen the range below to sweep a full orbit
+      phase -- widen the range below to sweep a full orbit (e.g. -0.3/0.3 to zoom
+      into Z Cha's eclipse window)
     default: '0.25'
   - flag: --phase-max
     label: phase max
@@ -63,32 +70,25 @@ panes:
       min, phase max, phase-num). For the outline/temperature/intensity outputs, >1
       writes one output file per phase (a sequence) instead of just one; the lightcurve/magnitude/shadow
       outputs always plot every phase together on one plot regardless
-    default: '1'
+    default: ''
   - flag: --phase-list
     label: explicit phase list (overrides above)
     type: str
     tip: Comma-separated list of exact orbital phases, e.g. '-0.02,-0.01,0.07,0.08'
       -- a third way to pick the phase(s) for every phase-dependent output, alongside
       the phase min/max/number range above (the same choice as printing specific pages
-      vs. a page range). Takes precedence over that range when given; leave blank
-      to use it instead. With the Shadow output, exactly 4 phases are read as (ingress
-      before, ingress after, egress before, egress after) and additionally overlay
-      the constrained area they imply -- derived purely from the secondary's own shadow,
-      no disc/stream assumption -- for comparison against wherever the current disc/stream
-      model puts whatever's eclipsed at those phases (a disc hot spot being the usual
-      case, not the only one)
+      vs. a page range). Takes precedence over that range when given. When fitting
+      parameters within the Shadow, Rim Projection and Primary modes, exactly 4 phases
+      are needed (1st ingress, 2nd ingress, 1st egress, 2nd egress), for the Fit System
+      mode, 8 phases are needed (4 for the primary and 4 for the bright spot).
     default: ''
   - flag: --phase_error
-    label: phase error (single value, or one per phase) [cycles]
+    label: phase error [cycles]
     type: str
-    tip: Uncertainty on the --phase-list phases, in the same units (orbital cycles)
-      -- a single number (applied to every phase alike) or a comma-separated list
-      with exactly one entry per phase (4 for Primary/Shadow/Rim projection, 8 for
-      Fit system). Used by those outputs' own --lsq_fit/--mcmc_fit to build a real
-      chi^2 (each residual divided by its own propagated uncertainty) instead of an
-      unweighted sum of squares, and by their own display to flank each solid contact-phase
-      curve with two faint dashed ones at phase +/- its own error. Leave blank to
-      keep residuals unweighted and skip the dashed curves.
+    tip: Phase uncertainty in cycles, used only by the Shadow, Primary, Rim Projection,
+      and Fit System outputs.  If only one value is given, then it applies to all
+      phases.  If a phase list is given, then the number of phase errors must be the
+      same as the number of phases.
     default: ''
 - title: PRIMARY
   arguments:
@@ -96,12 +96,12 @@ panes:
     label: radius R_1 [units of a]
     type: float
     tip: R_1
-    default: '0.01326576'
+    default: '0.0195'
   - flag: --T_1
     label: effective temperature T_1 [K]
     type: float
     tip: T_1
-    default: '14700.0'
+    default: '14700'
   - flag: --u_1
     label: limb-darkening coefficient u_1
     type: float
@@ -109,7 +109,7 @@ panes:
       Also reduces how strongly the primary irradiates the secondary, so it is baked
       into a saved irradiation cache -- changing it after loading one is ignored with
       a warning'
-    default: '0.377'
+    default: '0.2'
   - flag: --n_areas_1
     label: number of surface elements
     type: int
@@ -158,13 +158,13 @@ panes:
     tip: Angular radius of the heated spot on the primary's surface around the field
       line's footpoint; only meaningful if Accretion connection angle(s) above is
       set
-    default: '5.0'
+    default: ''
   - flag: --T_acc
     label: accretion spot temperature T_acc [K]
     type: float
     tip: Temperature of the accretion spot; only meaningful if Accretion connection
       angle(s) above is set. Ignored with a warning if not hotter than T_eff above
-    default: '100000.0'
+    default: ''
   - flag: --u_acc
     label: accretion spot limb-darkening coefficient u_acc
     type: float
@@ -172,7 +172,7 @@ panes:
       coefficient above; only meaningful if Accretion connection angle(s) above is
       set. Negative values give limb-brightening instead of darkening, a crude stand-in
       for cyclotron beaming'
-    default: '0.0'
+    default: ''
 - title: SECONDARY
   arguments:
   - flag: --R_2
@@ -190,7 +190,7 @@ panes:
     label: effective temperature T_2 [K]
     type: float
     tip: T_2
-    default: '3000.0'
+    default: '2800'
   - flag: --u_2
     label: limb-darkening coefficient u_2
     type: float
@@ -202,7 +202,7 @@ panes:
     label: gravity-darkening exponent beta_grav
     type: float
     tip: beta_grav (Lucy 1967); default 0.08 if left blank
-    default: ''
+    default: '0.08'
   - flag: --n_areas_2
     label: number of surface elements
     type: int
@@ -215,55 +215,54 @@ panes:
     label: inner radius R_in [units of a]
     type: float
     tip: R_in
-    default: ''
+    default: '0.2'
   - flag: --R_out
     label: outer radius R_out [units of a]
     type: float
     tip: R_out (semi-major axis if e_d>0)
-    default: ''
+    default: '0.334'
   - flag: --T_0
     label: temperature at R_in T_0 [K]
     type: float
     tip: T_0
-    default: ''
+    default: '5000'
   - flag: --beta_d
     label: temperature power-law index beta_d
     type: float
     tip: 'beta_d: T_d(R) = T_0*(R/R_in)^beta_d'
-    default: ''
-  - flag: --e_d
-    label: disc eccentricity e_d
-    type: float
-    tip: e_d; 0 = circular
-    default: ''
-  - flag: --omega_d
-    label: periastron orientation omega_d [deg]
-    type: float
-    tip: omega_d
-    default: ''
+    default: '-0.75'
   - flag: --alpha_d
     label: half-opening angle alpha_d [deg]
     type: float
     tip: alpha_d from the midplane; 0 = geometrically flat disc
-    default: ''
+    default: '2'
+  - flag: --e_d
+    label: disc eccentricity e_d
+    type: float
+    tip: e_d; 0 = circular
+    default: '0.0'
+  - flag: --omega_d
+    label: periastron orientation omega_d [deg]
+    type: float
+    tip: omega_d
+    default: '0.0'
   - flag: --u_d
     label: limb-darkening coefficient u_d
     type: float
     tip: 'Linear law: I = I0*(1-u+u*mu); 0 = no limb darkening. Also reduces how strongly
       the disc irradiates the secondary, so it is baked into a saved irradiation cache
       -- changing it after loading one is ignored with a warning'
-    default: ''
+    default: '0.0'
   - flag: --n_areas_d
     label: number of surface elements
     type: int
     tip: Total number of roughly equal-area surface elements used for the disc, shared
       by every output
-    default: ''
+    default: '2000'
   - type: text
     text: "Disc structure and temperature model (ModelParams in params.py):\n    T_d(R)\
       \ = T_0 * (R/R_in)^beta_d\ne_d/omega_d/alpha_d default to 0 (circular, flat\n\
-      disc) if left blank. Leaving R_in/R_out/T_0/beta_d all blank\nskips the disc\
-      \ (and hot spot) entirely.\n"
+      disc) if left blank.\n"
     flag: ''
     label: ''
 - title: STREAM
@@ -272,12 +271,12 @@ panes:
     label: hot-spot peak temperature T_h [K]
     type: float
     tip: T_h
-    default: ''
+    default: '20000'
   - flag: --L_h
     label: hot-spot decay length L_h [deg]
     type: float
     tip: L_h
-    default: ''
+    default: '5'
   - flag: --stream_angle
     label: stream integration limit angle stream_angle [deg]
     type: float
@@ -288,12 +287,11 @@ panes:
       -- a disc impact along the way is reported but no longer stops it). Every stream
       integration prints its closest approach and final radius (units of a), and where
       it hits the disc if it passes through one.
-    default: '900'
+    default: ''
   - type: text
     text: "Stream-impact hot spot on the outer disc rim:\n    T(phi) = max(T_d(rim(phi)),\
       \ T_h * exp(-(phi-phi_h)/L_h))\nphi_h (the impact azimuth) is not a free parameter\
-      \ -- it's\nderived from q and the disc geometry above. Leaving T_h/L_h\nblank\
-      \ (or the disc's own inputs blank) skips the hot spot.\n"
+      \ -- it's\nderived from q and the disc geometry above.\n"
     flag: ''
     label: ''
 - title: OUTPUT
@@ -339,7 +337,7 @@ panes:
   - flag: --outdir
     label: output directory
     type: dir
-    default: ./examples/outputs
+    default: demo_output
   - flag: --save-irradiation
     label: save irradiation cache to
     type: str
@@ -362,7 +360,7 @@ panes:
     type: float
     tip: Subtracted from the observed data's phase column (photometric or RV) before
       overlay/fitting, to correct for a bad ephemeris in the data (fraction of P_orb)
-    default: '0.0'
+    default: ''
   - flag: --data-file
     label: photometric data file (CSV or FITS)
     type: file
@@ -372,7 +370,7 @@ panes:
   - flag: --data-phase-col
     label: photometric phase column
     type: str
-    default: phase
+    default: ''
   - flag: --data-flux-col
     label: photometric flux column
     type: str
@@ -428,7 +426,7 @@ panes:
   - flag: --data_rv_2_err_col
     label: RV data error column (secondary)
     type: str
-    default: e_RV
+    default: ''
   - flag: --data_rv_stream_col
     label: RV data column (accretion stream)
     type: str
@@ -452,7 +450,7 @@ panes:
     type: float
     tip: Added to every model RV curve before comparing to any RV data column above
       -- the model itself has zero systemic velocity. Fittable via FIT tab as 'rv_gamma'
-    default: '0.'
+    default: ''
 - title: FIT
   arguments:
   - flag: --lsq_fit
@@ -460,7 +458,7 @@ panes:
     type: str
     tip: 'Comma-separated parameter names to fit by least squares against Observed
       data file and/or any active RV data column (jointly if more than one), e.g.
-      ''ph_off,dist'' -- requires at least one of those; starts from each parameter''s
+      "ph_off,dist" -- requires at least one of those; starts from each parameter''s
       current value and updates it in place to the best fit before any output is produced.
       Fittable names -- System: P_orb (period [d]), a (separation [m]), q (mass ratio
       M2/M1), R_1 (primary radius), T_1/T_2 (temperatures [K]), incl (inclination
@@ -534,12 +532,6 @@ panes:
       low-resolution/few-phase preview can finish before a process pool even starts
       up
     default: '1'
-  - flag: --dist
-    label: observer dist [pc]
-    type: float
-    tip: Scales the light curve from a relative flux to a real spectral flux density
-      [mJy] at this distance
-    default: '10.0'
   - flag: --pixelmapping
     label: pixel mapping (temperature render)
     type: choice

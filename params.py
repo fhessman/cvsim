@@ -53,13 +53,16 @@ import numpy as np
 import yaml
 
 from blackbody import V_WAVELENGTH_M
+from render import RSUN
 
 
 @dataclass
 class SystemParams:
     """The binary's physically "given" parameters."""
     P_orb: float                              # orbital period [d]
-    a: float                                  # orbital separation [m]
+    a: float                                  # orbital separation [R_sun] -- see the a_m
+                                               # property below for the SI (meters) value every
+                                               # physics-layer function actually wants
     q: float                                  # mass ratio, M2/M1
     R_1: float                                # primary radius, units of a
     T_1: float                                # primary effective temperature [K]
@@ -91,11 +94,21 @@ class SystemParams:
                                                # azimuth in this package (from +x, the sub-secondary
                                                # direction at phase 0, increasing counterclockwise as
                                                # seen from +z). See magnetic.py.
+    flux_offset: float = 0.0                  # additive flux offset [mJy], for light not captured by
+                                               # this model (e.g. third light/background contamination)
+                                               # -- added to the light curve's own total AFTER distance
+                                               # scaling (see simulate.py), so it's independent of
+                                               # --dist unlike every other flux in this package.
 
     @property
     def wavelength_m(self):
         """wavelength converted to meters, for blackbody.band_intensity etc."""
         return self.wavelength * 1e-10
+
+    @property
+    def a_m(self):
+        """orbital separation converted to meters (SI), for any physics-layer use."""
+        return self.a * RSUN
 
     @property
     def P_orb_s(self):
@@ -265,7 +278,7 @@ def build_system(system: SystemParams, model: ModelParams, ntheta=181, nphi=361)
 _HEADER_FIELDS = {
     # keyword: (dataclass, field name, comment)
     "P_ORB": ("system", "P_orb", "d, orbital period"),
-    "A": ("system", "a", "m, orbital separation"),
+    "A": ("system", "a", "Rsun, orbital separation"),
     "Q": ("system", "q", "mass ratio M2/M1"),
     "R1": ("system", "R_1", "primary radius, units of a"),
     "T1": ("system", "T_1", "K, primary effective temperature"),
@@ -278,6 +291,7 @@ _HEADER_FIELDS = {
     "PH_OFF": ("system", "ph_off", "phases, subtracted from data before overlay"),
     "THETA1": ("system", "theta_1", "deg, magnetic obliquity from the spin axis"),
     "PHI1": ("system", "phi_1", "deg, primary magnetic-axis azimuth"),
+    "FLUXOFF": ("system", "flux_offset", "mJy, additive flux offset (unmodeled light)"),
     "R_IN": ("model", "R_in", "units of a, disc inner radius"),
     "R_OUT": ("model", "R_out", "units of a, disc outer radius (semi-major axis)"),
     "T0": ("model", "T_0", "K, disc temperature at R_in"),
@@ -481,7 +495,7 @@ def raw_angle_acc_from_config(path):
 
 _FIELD_HELP = {
     "P_orb": "orbital period [d]",
-    "a": "orbital separation [m]",
+    "a": "orbital separation [R_sun]",
     "q": "mass ratio, M2/M1",
     "R_1": "primary radius [units of a]",
     "T_1": "primary effective temperature [K]",
@@ -500,6 +514,10 @@ _FIELD_HELP = {
                "-- see magnetic.py. Currently unused (no magnetic field model yet)",
     "phi_1": "primary magnetic-axis azimuth [deg], measured from +x (the sub-secondary "
              "direction at phase 0) -- see magnetic.py. Currently unused",
+    "flux_offset": "additive flux offset [mJy] for light this model doesn't capture (e.g. "
+                   "third light/background contamination) -- added to the light curve's own "
+                   "total AFTER distance scaling, so unlike every other flux here it's "
+                   "independent of --dist",
     "R_in": "disc inner radius [units of a]; leave this and R_out/T_0/beta_d "
             "all unset to skip the disc (and hot spot) entirely",
     "R_out": "disc outer radius (semi-major axis if e_d>0) [units of a]; see R_in",

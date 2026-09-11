@@ -243,7 +243,8 @@ def disc_grid_teff(disc, a_meters, M1_kg, Mdot_kgps, n_r=80, n_nu=160):
 
 
 def disc_surfaces_with_teff(disc, teff_func, n_r=40, n_nu=80, n_z=20, n_wall=None,
-                             T_h=None, phi_h=0.0, L_h_deg=5.0):
+                             T_h=None, phi_h=0.0, L_h_deg=5.0, nu_refine=None, refine_factor=4.0,
+                             footprint=None):
     """
     Flared (opening_angle>0) disc's four surfaces (upper/lower cone,
     outer/inner edge) as (x,y,z,normals,areas,T,surface_id), T=teff_func(r)
@@ -251,16 +252,34 @@ def disc_surfaces_with_teff(disc, teff_func, n_r=40, n_nu=80, n_z=20, n_wall=Non
     the edge surfaces get teff_func(rim(nu)) / teff_func(r_in), "the
     temperature of the local disc" at their radius.
 
-    Stream-impact hot spot on the outer rim (surface_id==2): if T_h is
-    given, the rim's base temperature there is replaced by
+    Stream-impact hot spot on the outer rim (surface_id==2), set in two
+    steps -- the stripe FIRST, then (overriding it) the footprint:
+
+    1. Stripe: if T_h is given, the rim's base temperature is replaced by
     max(T_base, T_h*exp(-dphi/L_h)), where dphi is the azimuthal distance
     downstream (prograde, increasing phi -- the same sense disc/stream
     material actually flows in this frame; see stream._eom) from the
-    impact site phi_h [rad] -- where the stream crosses the outer disc
-    radius -- wrapped to [0, 2*pi) so it decays smoothly all the way
-    around instead of blowing up on the upstream side. L_h_deg is the
-    decay length in degrees (~5 deg for a typical CV bright spot); T_h is
-    a measure of the kinetic energy the stream dissipates on impact.
+    impact site phi_h [rad] -- the central impact point, where the
+    stream's own centerline crosses the outer disc radius -- wrapped to
+    [0, 2*pi) so it decays smoothly all the way around instead of
+    blowing up on the upstream side. L_h_deg is the decay length in
+    degrees (~5 deg for a typical CV bright spot); T_h is a measure of
+    the kinetic energy the stream dissipates on impact.
+
+    2. Footprint: if `footprint` (a (W_eff, H) pair) is ALSO given, every
+    point actually covered by the stream's own physical footprint on the
+    wall (an ellipse in the local (arc-length-along-rim, z) plane,
+    centered on phi_h -- W_eff the tangential half-width, oblique-
+    projection-stretched by the incidence angle; H the vertical half-
+    height -- same construction as plots.stream_impact_ellipse_outline's
+    disc-flush ellipse) is set FLATLY to T_h, unconditionally overriding
+    whatever step 1 gave there (not a further max()) -- physically, the
+    stream dumps its energy directly, roughly uniformly, over the patch
+    it actually strikes; the stripe describes the disc material's own
+    trailing wake DOWNSTREAM of that direct-impact patch, not the patch
+    itself, and can otherwise both over- and under-state the true
+    temperature right at the impact site. None (the default) skips this
+    step, leaving the plain stripe with no footprint carve-out.
 
     Confined to the wall deliberately, not spread onto the neighboring
     upper/lower cone surfaces: the impact is physically a feature of the
@@ -272,6 +291,10 @@ def disc_surfaces_with_teff(disc, teff_func, n_r=40, n_nu=80, n_z=20, n_wall=Non
     visible at the current resolution/pixel_mapping, that's a rendering
     (sampling/binning) concern to fix there, not a reason to paint the
     hot spot onto geometry it doesn't belong on.
+
+    nu_refine/refine_factor: forwarded straight to disc.all_surfaces_grid
+    (see its own docstring) -- denser outer-wall sampling over that
+    azimuthal window, same total n_wall budget. None (default) skips it.
     """
     # the wall surfaces (outer/inner edge) get their own n_z:n_nu split
     # matching their own aspect ratio, not the cone surfaces' n_nu -- see
@@ -299,15 +322,23 @@ def disc_surfaces_with_teff(disc, teff_func, n_r=40, n_nu=80, n_z=20, n_wall=Non
     else:
         n_z_wall, n_nu_wall = n_z, n_nu
     x, y, z, normals, areas, r, sid = disc.all_surfaces_grid(
-        n_r=n_r, n_nu=n_nu, n_z=n_z_wall, n_nu_wall=n_nu_wall)
+        n_r=n_r, n_nu=n_nu, n_z=n_z_wall, n_nu_wall=n_nu_wall,
+        nu_refine=nu_refine, refine_factor=refine_factor)
     T = teff_func(r)
     if T_h is not None:
         outer = sid == 2
         phi = np.arctan2(y[outer], x[outer] - disc.x1)
         dphi = np.mod(phi - phi_h, 2.0 * np.pi)
         hot = T_h * np.exp(-dphi / np.radians(L_h_deg))
+        T_outer = np.maximum(T[outer], hot)
+        if footprint is not None:
+            W_eff, H = footprint
+            dnu_signed = np.mod(phi - phi_h + np.pi, 2.0 * np.pi) - np.pi
+            s = r[outer] * dnu_signed
+            in_footprint = (s / W_eff) ** 2 + (z[outer] / H) ** 2 <= 1.0
+            T_outer[in_footprint] = T_h
         T = T.copy()
-        T[outer] = np.maximum(T[outer], hot)
+        T[outer] = T_outer
     return x, y, z, normals, areas, T, sid
 
 
@@ -687,7 +718,8 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
                             n_disc_irrad=(30, 60), irrad_chunk=150, u_disc=0.0,
                             u_primary=0.0, n_primary_irrad=200, n_primary=200,
                             theta_1=0.0, phi_1=0.0, angle_acc=None, spot_acc=np.radians(5.0),
-                            T_acc=100000.0, u_acc=0.0, incl_deg=None, stream_angle_deg=None):
+                            T_acc=100000.0, u_acc=0.0, incl_deg=None, stream_angle_deg=None,
+                            stream_eps=None):
     """
     Build the TemperatureMaps consumed by render_system_image and (for a
     single call spanning many phases) physical_light_curve.
@@ -702,6 +734,15 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
     connection (angle_acc, possibly beyond where the default stopping
     condition would have reached) and for the closest-approach/final-
     radius diagnostic integrate_stream itself prints.
+
+    stream_eps: the real (T_2/P_orb/a_m-derived, see
+    stream.lubow_shu_eps) Lubow & Shu sound speed -- used both for the
+    trajectory's own integration and for its true cross-section
+    (stream.lubow_shu_stream_size), so the rendered stream_pts/
+    stream_areas below actually show the stream's own physical width/
+    height at each point, not a fixed-width, zero-thickness stand-in.
+    None (the default, for callers with no distance/period on hand)
+    falls back to integrate_stream's own generic 0.02.
 
     irradiate (default True): give the secondary its full irradiated
     temperature map (gravity darkening plus absorbed flux from the
@@ -808,11 +849,54 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
     flared = disc.opening_angle > 0.0
 
     hotspot_phi_h = None
+    hotspot_nu_refine = None
+    hotspot_footprint = None
     if hotspot_T_h is not None:
         from stream import impact_azimuth
+        # a cheap existence check only (does the stream reach this rim at
+        # all?) -- impact_azimuth's own discrete-trajectory-index azimuth
+        # is then DISCARDED in favor of disc_impact_point/impact_incidence's
+        # more precise, interpolated one below, so the stripe's own dphi=0
+        # reference and the footprint's own center are exactly the same
+        # point (previously they weren't quite: this function used
+        # impact_azimuth's coarser estimate for the stripe while the
+        # outline diagram's own matching code, simulate.py's
+        # _outline_draw_state, already used the finer one -- now both
+        # agree).
         hotspot_phi_h = impact_azimuth(lobe, disc)
-        if hotspot_phi_h is None:  # stream never reaches this disc's rim
+        if hotspot_phi_h is None:
             hotspot_T_h = None
+        elif flared:
+            from stream import disc_impact_point, impact_incidence, lubow_shu_stream_size
+            impact = disc_impact_point(lobe, disc, eps=0.02)
+            if impact is None:
+                hotspot_T_h = None
+            else:
+                # Uses integrate_stream's own generic eps (0.02), not a
+                # T_2/P_orb/a_m-derived physical value -- render.py has
+                # no distance/period on hand here (unlike simulate.py's
+                # own matching computation), and this only steers
+                # *sampling density* plus the footprint's own shape, not
+                # any actual temperature value, so that generic estimate
+                # is more than good enough.
+                nu_imp, cos_incidence = impact_incidence(impact, disc)
+                H, W = lubow_shu_stream_size(impact["r1"], lobe.q, 0.02)
+                r_imp = disc.rim(nu_imp)
+                W_eff = W / max(cos_incidence, 0.05)
+                hotspot_phi_h = nu_imp
+                hotspot_footprint = (float(W_eff), float(H))
+                # denser outer-wall sampling (see disc_surfaces_with_teff's
+                # own nu_refine) over the azimuthal window the hot spot
+                # actually affects: from the footprint's own upstream edge
+                # to several decay lengths downstream, well past where
+                # T_h*exp(-dphi/L_h) has faded below ~1% of its peak.
+                nu_start = nu_imp - W_eff / r_imp
+                nu_end = nu_imp + 5.0 * np.radians(hotspot_L_h_deg)
+                hotspot_nu_refine = (nu_start, nu_end)
+        # else (a flat disc): hotspot_phi_h stays impact_azimuth's own
+        # estimate from above -- disc_grid_with_teff (the flat-disc path
+        # below) has never taken a hot spot at all, so it's unused, same
+        # as before this function grew the footprint/nu_refine machinery.
 
     # --- primary: fixed direction pattern (unit sphere) for the observer-
     #     facing render/flux resolution -- see n_primary's docstring above
@@ -838,7 +922,8 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
         stream_areas = np.zeros(0)
         traj = None
     else:
-        from stream import integrate_stream, disc_impact_index, closest_approach_index, sample_points
+        from stream import (integrate_stream, disc_impact_index, closest_approach_index,
+                             sample_points, lubow_shu_stream_size)
         # extend the integration limit (if needed) to guarantee the
         # trajectory actually sweeps far enough to reach every requested
         # accretion-connection angle -- see accretion_connection_line's
@@ -850,26 +935,33 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
             max_angle_acc = float(np.max(np.atleast_1d(angle_acc)))
             eff_stream_angle = max(stream_angle_deg, max_angle_acc) \
                 if stream_angle_deg is not None else max_angle_acc
-        traj = integrate_stream(lobe, stream_angle_deg=eff_stream_angle)
-        # always reported (see disc_impact_index's own report= option),
-        # even when its result isn't used for truncation below
-        disc_idx = disc_impact_index(traj, disc.rim, lobe.x1, report=True)
+        # the real (T_2/P_orb/a_m-derived) Lubow & Shu sound speed, not
+        # integrate_stream's own generic 0.02 default -- used for BOTH
+        # the trajectory itself and its own cross-section below, so the
+        # rendered stream is self-consistent with the physical system,
+        # not an arbitrary trajectory's cross-section grafted onto it.
+        # stream_eps=None (the default, for callers with no distance/
+        # period on hand) falls back to that same generic value.
+        eps_eff = stream_eps if stream_eps is not None else 0.02
+        traj = integrate_stream(lobe, eps=eps_eff, stream_angle_deg=eff_stream_angle)
+        # reported purely as information (see disc_impact_index's own
+        # report= option) -- NOT used to truncate the stream below: how
+        # far it extends (as both a visible ribbon and a physical
+        # contributor to the temperature map/light curve) is regulated
+        # only by an explicit stream_angle_deg, or (default) the
+        # trajectory's own closest approach to the primary, regardless of
+        # whether it happens to pass through the disc first.
+        disc_impact_index(traj, disc.rim, lobe.x1, report=True)
         if stream_angle_deg is not None:
             # an explicit stream_angle_deg (see simulate.py's --stream_angle)
             # is the user's own authoritative instruction for how far the
-            # stream extends -- e.g. to simulate overflow past where it
-            # would otherwise hit the disc (see STREAM tab's own note) --
-            # so use the WHOLE computed trajectory (as both a visible
-            # ribbon and a physical contributor to the temperature map/
-            # light curve) rather than second-guessing it with the
-            # disc-impact/closest-approach heuristics below, which exist
-            # only to pick a sensible endpoint when stream_angle_deg wasn't
-            # given at all.
+            # stream extends -- so use the WHOLE computed trajectory rather
+            # than second-guessing it with the closest-approach heuristic
+            # below, which exists only to pick a sensible endpoint when
+            # stream_angle_deg wasn't given at all.
             idx = len(traj["x"]) - 1
         else:
-            idx = disc_idx
-            if idx is None:
-                idx = closest_approach_index(traj, lobe.x1)
+            idx = closest_approach_index(traj, lobe.x1)
             if idx is None:
                 idx = len(traj["x"]) - 1
         n_along = 300
@@ -877,24 +969,43 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
         s_vals = np.linspace(0.0, s_max, n_along)
         xs_s, ys_s = sample_points(traj, s_vals)
 
-        # a real stream has finite cross-section; give it a small but nonzero
-        # width (R1 is a convenient, physically-motivated scale) sampled as a
-        # few parallel strands, rather than a literal zero-width line -- a
-        # single-pixel-wide line is nearly invisible against the disc/
-        # secondary (especially since stream_T, set by the L1 cusp, tends to
-        # be the coldest point in the whole image, i.e. the darkest color).
-        n_strands = 5
-        stream_width = R1
+        # the stream's own true Lubow & Shu (1975)/Hessman (1999)
+        # cross-section (half-width W transverse in-plane, half-height H
+        # perpendicular to the orbital plane, both r1-dependent -- see
+        # stream.lubow_shu_stream_size), sampled as a small (n_w x n_h)
+        # grid of points at each along-path position, rather than the
+        # previous single fixed-width (R1), zero-thickness (z=0) ribbon.
+        # This makes the stream's actual physical extent something that
+        # gets RENDERED -- baked into the same sample-point/occlusion/
+        # binning pipeline every other body uses -- instead of only ever
+        # being SHOWN as a separate vector curve drawn on top of the
+        # pixel image (see plots.stream_tube_outline, now used only by
+        # the outline/primary diagrams, which have no physical render of
+        # their own to draw it against).
+        r1_s = np.hypot(xs_s - lobe.x1, ys_s)
+        H_s, W_s = lubow_shu_stream_size(r1_s, lobe.q, eps_eff)
+        n_w, n_h = 5, 3
         tangent = np.gradient(np.stack([xs_s, ys_s], axis=-1), axis=0)
         tangent /= np.maximum(np.linalg.norm(tangent, axis=-1, keepdims=True), 1e-300)
         perp = np.stack([-tangent[:, 1], tangent[:, 0]], axis=-1)
-        offsets = np.linspace(-0.5, 0.5, n_strands) * stream_width
-        xs_ribbon = xs_s[:, None] + offsets[None, :] * perp[:, 0:1]
-        ys_ribbon = ys_s[:, None] + offsets[None, :] * perp[:, 1:2]
-        stream_pts = np.stack([xs_ribbon.ravel(), ys_ribbon.ravel(),
-                                np.zeros(n_along * n_strands)], axis=-1)
-        stream_areas = np.full(n_along * n_strands,
-                                (stream_width / n_strands) * (s_max / n_along))
+        w_frac = np.linspace(-1.0, 1.0, n_w)
+        h_frac = np.linspace(-1.0, 1.0, n_h)
+        w_off = W_s[:, None] * w_frac[None, :]                     # (n_along, n_w)
+        x_wall = xs_s[:, None] + w_off * perp[:, 0:1]              # (n_along, n_w)
+        y_wall = ys_s[:, None] + w_off * perp[:, 1:2]              # (n_along, n_w)
+        x_grid = np.broadcast_to(x_wall[:, :, None], (n_along, n_w, n_h))
+        y_grid = np.broadcast_to(y_wall[:, :, None], (n_along, n_w, n_h))
+        z_grid = np.broadcast_to((H_s[:, None] * h_frac[None, :])[:, None, :],
+                                  (n_along, n_w, n_h))
+        stream_pts = np.stack([x_grid.ravel(), y_grid.ravel(), z_grid.ravel()], axis=-1)
+        # same "per-strand width times per-sample arclength" area
+        # convention as the old fixed-width ribbon, just with the real,
+        # now r1-varying W -- repeated identically across the n_h height
+        # levels (they subsample the SAME transverse strip's own
+        # vertical extent, not separate additional area).
+        ds = s_max / n_along
+        area_along = (2.0 * W_s / n_w) * ds
+        stream_areas = np.broadcast_to(area_along[:, None, None], (n_along, n_w, n_h)).ravel()
 
     # --- accretion spot: connect the stream to a magnetic field line at
     #     radius angle_acc (see this function's own docstring, magnetic.py) ---
@@ -909,7 +1020,8 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
         if flared:
             xi, yi, zi, ni, areai, Ti_disc, _sid = disc_surfaces_with_teff(
                 disc, disc_teff_func, n_r=n_disc_irrad[0], n_nu=n_disc_irrad[1], n_z=n_disc_z,
-                T_h=hotspot_T_h, phi_h=hotspot_phi_h, L_h_deg=hotspot_L_h_deg)
+                T_h=hotspot_T_h, phi_h=hotspot_phi_h, L_h_deg=hotspot_L_h_deg,
+                footprint=hotspot_footprint)
             disc_pos_irrad = np.stack([xi, yi, zi], axis=-1)
             disc_normal_irrad = ni
         else:
@@ -947,7 +1059,8 @@ def build_temperature_maps(lobe, disc, T_eff1, T_eff2, R1,
                 n_r * n_nu, disc.r_in, disc.a, disc.opening_angle, incl_deg)
         xs, ys, zs, ns, disc_areas, Td, _sid = disc_surfaces_with_teff(
             disc, disc_teff_func, n_r=n_r, n_nu=n_nu, n_z=n_disc_z, n_wall=n_wall,
-            T_h=hotspot_T_h, phi_h=hotspot_phi_h, L_h_deg=hotspot_L_h_deg)
+            T_h=hotspot_T_h, phi_h=hotspot_phi_h, L_h_deg=hotspot_L_h_deg,
+            nu_refine=hotspot_nu_refine, footprint=hotspot_footprint)
         disc_pts = np.stack([xs, ys, zs], axis=-1)
         disc_normals = ns
     else:
@@ -1580,7 +1693,9 @@ def radial_velocity_curve(lobe, disc, T_eff1, R1, phases, incl_deg, a_meters, P_
 
     a_meters/P_orb_s: convert the dimensionless (a=1, Omega=1) internal
     velocity unit to km/s -- v_scale = a_meters*2*pi/P_orb_s, the
-    standard orbital-velocity normalization (e.g. SystemParams.a/P_orb_s).
+    standard orbital-velocity normalization (e.g. SystemParams.a_m/P_orb_s
+    -- SystemParams' own `a` field is in Rsun, not meters; a_m is its SI
+    conversion).
 
     stream_angle_deg: forwarded to this function's own (fresh, see below)
     stream.integrate_stream call -- see its own docstring. Only affects
@@ -1640,19 +1755,18 @@ def radial_velocity_curve(lobe, disc, T_eff1, R1, phases, incl_deg, a_meters, P_
     # one velocity, so only the centerline needs sampling for this).
     if lobe.fill_factor >= 1.0:
         traj = integrate_stream(lobe, stream_angle_deg=stream_angle_deg)
-        # always reported (see disc_impact_index's own report= option),
-        # even when its result isn't used for truncation below
-        disc_idx = disc_impact_index(traj, disc.rim, lobe.x1, report=True)
+        # reported purely as information (see disc_impact_index's own
+        # report= option) -- NOT used to truncate the stream below, same
+        # as build_temperature_maps' matching section.
+        disc_impact_index(traj, disc.rim, lobe.x1, report=True)
         if stream_angle_deg is not None:
             # see build_temperature_maps' matching explicit-stream_angle_deg
             # override -- an explicit request for how far the stream
-            # extends shouldn't be second-guessed by the disc-impact/
-            # closest-approach heuristics below.
+            # extends shouldn't be second-guessed by the closest-approach
+            # heuristic below.
             idx = len(traj["x"]) - 1
         else:
-            idx = disc_idx
-            if idx is None:
-                idx = closest_approach_index(traj, lobe.x1)
+            idx = closest_approach_index(traj, lobe.x1)
             if idx is None:
                 idx = len(traj["x"]) - 1
         n_along = 300
@@ -1900,8 +2014,9 @@ def physical_light_curve(lobe, disc, T_eff1, T_eff2, R1, phases, incl_deg, a_met
     built with the orbital separation as the length unit -- so
     band_intensity(T, wavelength_m) * dA * cos(theta), summed, is only
     proportional to a real flux. a_meters (the orbital separation in
-    meters, i.e. SystemParams.a) converts that to an actual observed
-    spectral flux density at `distance_pc` parsecs (10 pc by default):
+    meters, i.e. SystemParams.a_m -- SystemParams' own `a` field is in
+    Rsun, not meters) converts that to an actual observed spectral flux
+    density at `distance_pc` parsecs (10 pc by default):
 
         F_lambda(d) = (relative flux) * a_meters^2 / (distance_pc * PARSEC_M)^2   [W/m^2/m]
 
