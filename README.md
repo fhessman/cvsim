@@ -381,7 +381,7 @@ accreting magnetic field lines occur at the end of the stream).
 
 ### EX Hya
 
-![EX Hya outline](examples/outputs/EX_Hya_plot_0.650000.png)
+![EX Hya outline](examples/outputs/EX_Hya_plot_0.65000.png)
 
 An intermediate polar: unlike AM Her, EX Hya has a real accretion disc
 with its own stream-impact hot spot
